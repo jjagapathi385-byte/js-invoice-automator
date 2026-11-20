@@ -1,0 +1,8 @@
+<!doctype html>
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>PO Invoice Automation</title>
+<style>body{font-family:system-ui,sans-serif;max-width:360px;margin:60px auto;padding:0 16px}
+input,button{font-size:16px;padding:10px;width:100%;box-sizing:border-box;margin-top:8px}</style></head>
+<body><h2>PO Invoice Automation</h2>
+<form method="post"><input type="password" name="pin" placeholder="PIN" autofocus><button>Enter</button></form>
+{% with m = get_flashed_messages() %}{% for x in m %}<p style="color:#b00">{{ x }}</p>{% endfor %}{% endwith %}
+</body></html>

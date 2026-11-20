@@ -1,0 +1,56 @@
+<!doctype html>
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Preview</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:720px;margin:24px auto;padding:0 16px;color:#222}
+label{display:block;margin-top:12px;font-weight:600}
+input,textarea,select,button{font-size:16px;padding:10px;width:100%;box-sizing:border-box;margin-top:6px}
+textarea{min-height:70px}
+fieldset{border:1px solid #ddd;border-radius:8px;margin-top:14px}
+.row{display:flex;gap:8px;align-items:center}.row input{width:auto;margin:0}
+.muted{color:#666;font-size:14px}
+button{background:#1f5fbf;color:#fff;border:0;border-radius:6px;margin-top:18px}
+</style></head>
+<body>
+<h2>Review before creating</h2>
+<p class="muted">Quotation {{ p.estimate_number }} → invoice from <b>{{ supplier }}</b>. Nothing is written until you confirm.</p>
+
+<form method="post" action="{{ url_for('confirm') }}">
+  <input type="hidden" name="token" value="{{ token }}">
+
+  <label>Order Number (PO)</label>
+  <input type="text" value="{{ p.po_number }}" disabled>
+
+  <label>Bill To</label>
+  <textarea name="bill_to">{{ p.bill_to }}</textarea>
+  <label>Ship To</label>
+  <textarea name="ship_to">{{ p.ship_to }}</textarea>
+
+  <label>Buyer GSTIN</label>
+  <input type="text" value="{{ p.gstin }}" disabled>
+  <label>Place of supply</label>
+  <input type="text" value="{{ p.state_name }} ({{ p.state_code }})" disabled>
+  <label>Tax</label>
+  <input type="text" value="{{ 'CGST 9% + SGST 9% (local)' if p.local else 'IGST 18% (interstate)' }}" disabled>
+  <label>Terms</label>
+  <input type="text" value="Due on Receipt" disabled>
+  <label>Attachment</label>
+  <input type="text" value="{{ p.po_name }}" disabled>
+
+  <fieldset>
+    <legend>Email (leave empty to save as draft)</legend>
+    {% if emails_saved %}
+      {% for e in emails_saved %}
+        <div class="row"><input type="checkbox" name="to" value="{{ e }}"> {{ e }}</div>
+      {% endfor %}
+    {% else %}<p class="muted">No saved emails for this customer yet.</p>{% endif %}
+    <label>Add new To email</label>
+    <input type="email" name="new_to" placeholder="name@example.com">
+    <label>CC</label>
+    <input type="email" name="new_cc" placeholder="optional">
+    <label>Greeting name (optional)</label>
+    <input type="text" name="greet_name" placeholder="Leave empty to use customer name">
+  </fieldset>
+
+  <button>Confirm and create invoice</button>
+</form>
+</body></html>

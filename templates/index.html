@@ -1,0 +1,53 @@
+<!doctype html>
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>PO Invoice Automation</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:720px;margin:24px auto;padding:0 16px;color:#222}
+label{display:block;margin-top:14px;font-weight:600}
+input,select,button{font-size:16px;padding:10px;width:100%;box-sizing:border-box;margin-top:6px}
+button{background:#1f5fbf;color:#fff;border:0;border-radius:6px;margin-top:14px}
+.card{border:1px solid #ddd;border-radius:8px;padding:12px;margin-top:10px}
+.err{color:#b00;margin-top:12px}.muted{color:#666;font-size:14px}
+.badge{display:inline-block;background:#eef;padding:2px 8px;border-radius:10px;font-size:13px}
+</style></head>
+<body>
+<h2>PO Invoice Automation</h2>
+<form method="post" enctype="multipart/form-data">
+  <label>PO file (PDF)</label>
+  <input type="file" name="po" accept=".pdf" required>
+  <label>Store code (optional override)</label>
+  <input type="text" name="store" value="{{ fields.store or '' }}">
+  <label>Quotation status</label>
+  <select name="status">
+    {% for val, label in status_options %}
+      <option value="{{ val }}" {% if val == status %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <button>Find matching quotations</button>
+</form>
+
+{% if error %}<p class="err">{{ error }}</p>{% endif %}
+
+{% if fields %}
+  <p class="muted">PO number: <b>{{ fields.po_number or 'not found' }}</b> ·
+     Buyer GSTIN: <b>{{ fields.gstin or 'not found' }}</b> · Amount: <b>{{ fields.amount or 'not found' }}</b></p>
+{% endif %}
+
+{% for r in results %}
+  <div class="card">
+    <div><b>{{ r.number }}</b> — {{ r.customer }}</div>
+    <div class="muted">{{ r.date }} · {{ r.status }} · Total {{ "%.2f"|format(r.total|float) }}</div>
+    <div style="margin-top:6px">
+      <span class="badge">score {{ r.score }}</span>
+      {% for reason in r.reasons %}<span class="badge">{{ reason }}</span> {% endfor %}
+    </div>
+    <form method="post" action="{{ url_for('preview') }}">
+      <input type="hidden" name="estimate_id" value="{{ r.id }}">
+      <input type="hidden" name="customer_id" value="{{ r.customer_id }}">
+      <input type="hidden" name="po_token" value="{{ po_token }}">
+      <input type="hidden" name="po_number" value="{{ fields.po_number or '' }}">
+      <input type="hidden" name="gstin" value="{{ fields.gstin or '' }}">
+      <button>Review and create invoice</button>
+    </form>
+  </div>
+{% endfor %}
+</body></html>

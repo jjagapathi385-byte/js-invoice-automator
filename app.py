@@ -180,11 +180,19 @@ def zoho_contact_emails(customer_id):
 
 def add_contact_email(customer_id, email):
     """Add an email to the customer's Zoho contact persons if it isn't there yet."""
-    emails, persons = zoho_contact_emails(customer_id)
-    if email and email not in emails:
-        persons.append({"email": email, "first_name": "", "last_name": email.split("@")[0],
-                        "is_primary_contact": False})
-        zh("PUT", f"/contacts/{customer_id}", json={"contact_persons": persons})  # VERIFY fields
+    if not customer_id or not email:
+        return
+    emails, _ = zoho_contact_emails(customer_id)
+    if email.lower() not in [e.lower() for e in emails]:
+         zh("POST", "/contacts/contactpersons", json={
+            "contact_id": customer_id,
+            "first_name": "",
+            "last_name": email.split("@")[0],
+            "email": email,
+            "is_primary_contact": False,
+        })
+
+
 
 
 # ---------- routes ----------
@@ -335,21 +343,35 @@ def confirm():
         inv = created["invoice"]
         inv_id = inv["invoice_id"]
 
-        # 2. Update billing & shipping addresses (everything in Street 1)
+        # 2. Override billing & shipping addresses on the invoice (all keys explicit so old customer city/zip don't linger)
+        addr_update = {}
         if p["bill_to"]:
-            zh("PUT", f"/invoices/{inv_id}/address/billing", json={
+            addr_update["billing_address"] = {
+                "attention": "",
                 "address": p["bill_to"][:100],
                 "street2": p["bill_to"][100:200] if len(p["bill_to"]) > 100 else "",
+                "city": "",
                 "state": p.get("state_name", ""),
+                "zip": "",
                 "country": "India",
-            })
+                "fax": "",
+                "phone": "",
+            }
         if p["ship_to"]:
-            zh("PUT", f"/invoices/{inv_id}/address/shipping", json={
+            addr_update["shipping_address"] = {
+                "attention": "",
                 "address": p["ship_to"][:100],
                 "street2": p["ship_to"][100:200] if len(p["ship_to"]) > 100 else "",
+                "city": "",
                 "state": p.get("state_name", ""),
+                "zip": "",
                 "country": "India",
-            })
+                "fax": "",
+                "phone": "",
+            }
+        if addr_update:
+            zh("PUT", f"/invoices/{inv_id}", json=addr_update)
+
 
 
         # 3. Attach PO and mark can_send_in_mail=true so Zoho includes it in the email

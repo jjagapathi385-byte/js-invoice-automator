@@ -335,14 +335,22 @@ def confirm():
         inv = created["invoice"]
         inv_id = inv["invoice_id"]
 
-        # 2. Update addresses on the created invoice
-        addr_body = {}
+        # 2. Update billing & shipping addresses (everything in Street 1)
         if p["bill_to"]:
-            addr_body["billing_address"] = {"address": p["bill_to"]}
+            zh("PUT", f"/invoices/{inv_id}/address/billing", json={
+                "address": p["bill_to"][:100],
+                "street2": p["bill_to"][100:200] if len(p["bill_to"]) > 100 else "",
+                "state": p.get("state_name", ""),
+                "country": "India",
+            })
         if p["ship_to"]:
-            addr_body["shipping_address"] = {"address": p["ship_to"]}
-        if addr_body:
-            zh("PUT", f"/invoices/{inv_id}", json=addr_body)
+            zh("PUT", f"/invoices/{inv_id}/address/shipping", json={
+                "address": p["ship_to"][:100],
+                "street2": p["ship_to"][100:200] if len(p["ship_to"]) > 100 else "",
+                "state": p.get("state_name", ""),
+                "country": "India",
+            })
+
 
         # 3. Attach PO and mark can_send_in_mail=true so Zoho includes it in the email
         if p["po_bytes"]:

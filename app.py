@@ -282,73 +282,119 @@ def confirm():
     if not p:
         return render_template("error.html", msg="Preview expired. Start again.")
 
-    # Recipients
-    to = [e.strip() for e in request.form.getlist("to") if e.strip()]
-    cc = [e.strip() for e in request.form.getlist("cc") if e.strip()]
-    new_to = request.form.get("new_to", "").strip()
-    if new_to:
-        to.append(new_to)
-        add_contact_email(p["customer_id"], new_to)
-    new_cc = request.form.get("new_cc", "").strip()
-    if new_cc:
-        cc.append(new_cc)
-        add_contact_email(p["customer_id"], new_cc)
-    greet_name = request.form.get("greet_name", "").strip()
-    # Addresses as corrected on the preview screen
-    p["bill_to"] = request.form.get("bill_to", p["bill_to"]).strip()
-    p["ship_to"] = request.form.get("ship_to", p["ship_to"]).strip()
+    try:
+        # Recipients
+        to = [e.strip() for e in request.form.getlist("to") if e.strip()]
+        cc = [e.strip() for e in request.form.getlist("cc") if e.strip()]
+        new_to = request.form.get("new_to", "").strip()
+        if new_to:
+            to.append(new_to)
+            add_contact_email(p["customer_id"], new_to)
+        new_cc = request.form.get("new_cc", "").strip()
+        if new_cc:
+            cc.append(new_cc)
+            add_contact_email(p["customer_id"], new_cc)
+        greet_name = request.form.get("greet_name", "").strip()
+        p["bill_to"] = request.form.get("bill_to", p["bill_to"]).strip()
+        p["ship_to"] = request.form.get("ship_to", p["ship_to"]).strip()
 
-    # 1. Create the invoice from the quotation (Zoho has no convert endpoint; link via estimate_id)
-    est = zh("GET", f"/estimates/{p['estimate_id']}")["estimate"]
-    line_items = [{"item_id": li["item_id"], "rate": li["rate"], "quantity": li["quantity"],
-                   "description": li.get("description", "")}
-                  for li in est.get("line_items", []) if li.get("item_id")]
-    created = zh("POST", "/invoices", json={
-        "customer_id": est["customer_id"], "estimate_id": p["estimate_id"],
-        "line_items": line_items, "payment_terms": 0, "payment_terms_label": "Due on Receipt",
-        "reference_number": p["po_number"]})  # VERIFY: estimate_id accepted on create
-    inv = created["invoice"]
-    inv_id = inv["invoice_id"]
+        # 1. Fetch quotation and build complete line items (supports both catalog & ad-hoc items)
+        est = zh("GET", f"/estimates/{p['estimate_id']}")["estimate"]
+        line_items = []
+        for li in est.get("line_items", []):
+            item = {
+                "name": li.get("name", ""),
+                "description": li.get("description", ""),
+                "rate": li["rate"],
+                "quantity": li["quantity"],
+            }
+            if li.get("item_id"):
+                item["item_id"] = li["item_id"]
+            if li.get("tax_id"):
+                item["tax_id"] = li["tax_id"]
+            if li.get("hsn_or_sac"):
+                item["hsn_or_sac"] = li["hsn_or_sac"]
+            line_items.append(item)
 
-    # 2. Update invoice fields
-    body = {
-        "reference_number": p["po_number"],            # Order Number field
-        "billing_address": {"address": p["bill_to"]},
-        "shipping_address": {"address": p["ship_to"]},
-        "payment_terms": 0,                            # VERIFY: due on receipt
-        "payment_terms_label": "Due on Receipt",
-        "place_of_supply": p["state_code"],           # letter code, e.g. TG
-        "gst_treatment": "business_gst",
-        "gst_no": p["gstin"],
-        "is_inclusive_tax": False,
-    }
-    zh("PUT", f"/invoices/{inv_id}", json=body)  # VERIFY field names
-
-    # 3. Attach PO to the invoice
-    if p["po_bytes"]:
-        requests.post(f"{API_URL}/invoices/{inv_id}/attachment",
-                      headers={"Authorization": f"Zoho-oauthtoken {zoho_token()}"},
-                      params={"organization_id": ORG_ID},
-                      files={"attachment": (p["po_name"], p["po_bytes"], "application/pdf")},
-                      timeout=60).raise_for_status()  # VERIFY field name
-
-    # 4. Email or draft
-    if to:
-        mail = {
-            "to_mail_ids": to, "cc_mail_ids": cc,
-            "subject": f"Invoice {inv.get('invoice_number', '')} from {SUPPLIER}",
-            "body": (f"Dear {greet_name or p['customer_name']},\n\n"),  # rest of body = Zoho default
-            "send_attachment": True,
+        inv_payload = {
+            "customer_id": est["customer_id"],
+            "estimate_id": p["estimate_id"],
+            "line_items": line_items,
+            "payment_terms": 0,
+            "payment_terms_label": "Due on Receipt",
+            "reference_number": p["po_number"],
+            "is_inclusive_tax": est.get("is_inclusive_tax", False),
         }
-        requests.post(f"{API_URL}/invoices/{inv_id}/email",
-                      headers={"Authorization": f"Zoho-oauthtoken {zoho_token()}"},
-                      params={"organization_id": ORG_ID}, json=mail, timeout=60).raise_for_status()  # VERIFY
-        result = "Invoice saved and emailed to " + ", ".join(to)
-    else:
-        result = "Invoice saved as draft (no recipients added)."
+        if p.get("gstin"):
+            inv_payload["gst_treatment"] = "business_gst"
+            inv_payload["gst_no"] = p["gstin"]
+        if p.get("state_code"):
+            inv_payload["place_of_supply"] = p["state_code"]
 
-    return render_template("done.html", result=result, inv_number=inv.get("invoice_number", ""),
-                           inv_id=inv_id)
+        created = zh("POST", "/invoices", json=inv_payload)
+        inv = created["invoice"]
+        inv_id = inv["invoice_id"]
+
+        # 2. Update addresses on the created invoice
+        addr_body = {}
+        if p["bill_to"]:
+            addr_body["billing_address"] = {"address": p["bill_to"]}
+        if p["ship_to"]:
+            addr_body["shipping_address"] = {"address": p["ship_to"]}
+        if addr_body:
+            zh("PUT", f"/invoices/{inv_id}", json=addr_body)
+
+        # 3. Attach PO and mark can_send_in_mail=true so Zoho includes it in the email
+        if p["po_bytes"]:
+            att_r = requests.post(
+                f"{API_URL}/invoices/{inv_id}/attachment",
+                headers={"Authorization": f"Zoho-oauthtoken {zoho_token()}"},
+                params={"organization_id": ORG_ID},
+                data={"can_send_in_mail": "true"},
+                files={"attachment": (p["po_name"], p["po_bytes"], "application/pdf")},
+                timeout=60,
+            )
+            att_r.raise_for_status()
+
+        # 4. Email (prepending greeting to Zoho's default template) or leave as draft
+        if to:
+            tpl = zh("GET", f"/invoices/{inv_id}/email")
+            default_body = tpl.get("data", {}).get("body", "")
+            default_subject = tpl.get("data", {}).get(
+                "subject", f"Invoice {inv.get('invoice_number', '')} from {SUPPLIER}"
+            )
+            greeting = f"<p>Dear {greet_name or p['customer_name']},</p>" if "<" in default_body else f"Dear {greet_name or p['customer_name']},\n\n"
+            mail = {
+                "to_mail_ids": to,
+                "cc_mail_ids": cc,
+                "subject": default_subject,
+                "body": greeting + default_body,
+                "attach_pdf": True,
+            }
+            mail_r = requests.post(
+                f"{API_URL}/invoices/{inv_id}/email",
+                headers={"Authorization": f"Zoho-oauthtoken {zoho_token()}"},
+                params={"organization_id": ORG_ID},
+                json=mail,
+                timeout=60,
+            )
+            mail_r.raise_for_status()
+            result = "Invoice created and emailed to " + ", ".join(to)
+        else:
+            result = "Invoice saved as draft (no recipients added)."
+
+        return render_template(
+            "done.html",
+            result=result,
+            inv_number=inv.get("invoice_number", ""),
+            inv_id=inv_id,
+        )
+    except requests.HTTPError as exc:
+        detail = exc.response.text if exc.response is not None else str(exc)
+        return render_template("error.html", msg=f"Zoho API Error: {detail}")
+    except Exception as exc:
+        return render_template("error.html", msg=f"Unexpected error: {exc}")
+
 
 
 if __name__ == "__main__":

@@ -156,7 +156,7 @@ def _clean(block):
 
 
 def extract_po_items(text):
-    """Extract line items (name, qty, rate, amount) from Paradise and Devyani PO layouts."""
+    """Extract line items (name, qty, rate, amount) from Paradise, Devyani, and generic PO PDFs."""
     items = []
 
     # 1. Paradise layout
@@ -176,20 +176,21 @@ def extract_po_items(text):
                     "amount": row.group(5),
                 })
 
-    # 2. Devyani layout (scans from Discription/Goods/Services/Gross Val Inc Tax down to TOTAL)
+    # 2. Devyani layout (handles both spaced and concatenated pypdf tokens)
     if not items and ("Delivery Warehouse:" in text or "Gross Val Inc Tax" in text or "Goods/Services" in text):
         m_tbl = re.search(
-            r"(?:Discription\s+HSN/SAC|Gross\s*Val\s*Inc\s*Tax|Goods/Services)\s*\n(.*?)(?=\n\s*TOTAL\b)",
+            r"(?:Discription|Description|Gross\s*Val\s*Inc\s*Tax|Goods/Services).*?\n(.*?)(?=\n\s*TOTAL\b)",
             text,
             re.S | re.I,
         )
         if m_tbl:
             for line in m_tbl.group(1).splitlines():
                 line = line.strip()
-                if not line or line.startswith(("of", "Goods/Services", "Code UNIT")):
+                if not line or re.match(r"^(?:of|Goods/Services|Code\s*UNIT|S\.?No|Material)", line, re.I):
                     continue
+                # Main row: "1 Lights 1.000 A.U 2,200.00 ... 2,596.00" (also handles optional material code)
                 m_main = re.match(
-                    r"^\d+\s+(.*?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,5}\s+([\d,]+\.\d{2})\s+.*?([\d,]+\.\d{2})\s*$",
+                    r"^\d+\s+(?:\d+\s+)?(.*?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,6}\s+([\d,]+\.\d{2})\s+.*?([\d,]+\.\d{2})\s*$",
                     line,
                 )
                 if m_main:
@@ -200,8 +201,9 @@ def extract_po_items(text):
                         "amount": m_main.group(4),
                     })
                     continue
+                # Sub-item row: "Tube lights 10.000 NO 220.00"
                 m_sub = re.match(
-                    r"^([A-Za-z][A-Za-z0-9\s\-/()]+?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,5}\s+([\d,]+\.\d{2})\s*$",
+                    r"^([A-Za-z][A-Za-z0-9\s\-/().,&]+?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,6}\s+([\d,]+\.\d{2})(?:\s+([\d,]+\.\d{2}))?\s*$",
                     line,
                 )
                 if m_sub:
@@ -209,8 +211,25 @@ def extract_po_items(text):
                         "name": m_sub.group(1).strip(),
                         "qty": m_sub.group(2),
                         "rate": m_sub.group(3),
-                        "amount": "",
+                        "amount": m_sub.group(4) or "",
                     })
+
+    # 3. Broad fallback across entire text if table headers varied
+    if not items:
+        for line in text.splitlines():
+            line = line.strip()
+            m_fb = re.match(
+                r"^\d+\s+(?:\d+\s+)?([A-Za-z][A-Za-z0-9\s\-/().,&]{2,60}?)\s+(\d+(?:\.\d+)?)\s+(?:A\.?U|NO|NOS|EA|SET|LOT|KG|MTR|PCS|BOX|UNIT)\s+([\d,]+\.\d{2})(?:.*?([\d,]+\.\d{2}))?\s*$",
+                line,
+                re.I,
+            )
+            if m_fb:
+                items.append({
+                    "name": m_fb.group(1).strip(),
+                    "qty": m_fb.group(2),
+                    "rate": m_fb.group(3),
+                    "amount": m_fb.group(4) or "",
+                })
 
     return items
 
@@ -345,7 +364,7 @@ def zoho_contact_emails(customer_id):
 
 
 def add_contact_email(customer_id, email):
-    """Create a new contact person on the customer (omit is_primary_contact so Zoho defaults safely)."""
+    """Save a new primary/To email to the customer's Zoho contact persons."""
     if not customer_id or not email:
         return
     emails, _ = zoho_contact_emails(customer_id)
@@ -382,7 +401,6 @@ def apply_greeting(default_body, greet_name):
     """Replace Zoho template's existing 'Dear ...,' greeting instead of duplicating it."""
     if not greet_name:
         return default_body
-    # Replace an existing "Dear <anything>," in Zoho's default template
     updated, count = re.subn(
         r"(Dear\s+)([^,<\r\n]+)(,)",
         rf"\g<1>{greet_name}\g<3>",
@@ -522,9 +540,8 @@ def confirm():
         return render_template("error.html", msg="Preview expired. Start again.")
 
     try:
-        # Collect To and CC recipients (supports comma/semicolon-separated addresses too)
+        # Collect To recipients (and save new_to to Zoho customer contacts)
         to = [e.strip() for raw in request.form.getlist("to") for e in re.split(r"[,;]+", raw) if e.strip()]
-        cc = [e.strip() for raw in request.form.getlist("cc") for e in re.split(r"[,;]+", raw) if e.strip()]
         new_to = request.form.get("new_to", "").strip()
         if new_to:
             for e in re.split(r"[,;]+", new_to):
@@ -532,15 +549,22 @@ def confirm():
                 if e and e not in to:
                     to.append(e)
                     add_contact_email(p["customer_id"], e)
-        new_cc = request.form.get("new_cc", "").strip()
-        if new_cc:
-            for e in re.split(r"[,;]+", new_cc):
+
+        # Collect CC recipients from any CC input field (do NOT save CC addresses to Zoho customer contacts)
+        cc_raw_list = (
+            request.form.getlist("cc")
+            + request.form.getlist("cc_emails")
+            + request.form.getlist("cc_mail_ids")
+            + [request.form.get("new_cc", "")]
+        )
+        cc = []
+        for raw in cc_raw_list:
+            for e in re.split(r"[,;]+", raw or ""):
                 e = e.strip()
                 if e and e not in cc:
                     cc.append(e)
-                    add_contact_email(p["customer_id"], e)
-        greet_name = request.form.get("greet_name", "").strip()
 
+        greet_name = request.form.get("greet_name", "").strip()
         p["bill_to"] = request.form.get("bill_to", p["bill_to"]).strip()
         p["ship_to"] = request.form.get("ship_to", p["ship_to"]).strip()
 

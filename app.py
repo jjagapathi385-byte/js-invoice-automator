@@ -156,7 +156,7 @@ def _clean(block):
 
 
 def extract_po_items(text):
-    """Extract line items (name, qty, rate, amount) verified against Paradise and Devyani PO PDFs."""
+    """Extract line items (name, qty, rate, amount) from Paradise and Devyani PO layouts."""
     items = []
 
     # 1. Paradise layout
@@ -176,43 +176,41 @@ def extract_po_items(text):
                     "amount": row.group(5),
                 })
 
-    # 2. Devyani layout: scan full text from S.No/Discription block down to TOTAL
-    if not items and ("Delivery Warehouse:" in text or "Discription" in text or "Goods/Services" in text):
+    # 2. Devyani layout
+    if not items and ("Delivery Warehouse:" in text or "Gross Val Inc Tax" in text):
         m_tbl = re.search(
-            r"Discription\s+HSN/SAC.*?\n(.*?)(?=\n\s*TOTAL\b)",
+            r"Gross\s*Val\s*Inc\s*Tax\s*\n(.*?)(?=\n\s*TOTAL\b)",
             text,
             re.S | re.I,
         )
-        block = m_tbl.group(1) if m_tbl else text
-        for line in block.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            # Main row: "1 Lights 1.000 A.U 2,200.00 2,200.00 2,200.00 0.00 0.00 0.00 0.00 18.00 396.00 0.00 0.00 2,596.00"
-            m_main = re.match(
-                r"^\d+\s+(.*?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,5}\s+([\d,]+\.\d{2})\s+.*?([\d,]+\.\d{2})\s*$",
-                line,
-            )
-            if m_main:
-                items.append({
-                    "name": m_main.group(1).strip(),
-                    "qty": m_main.group(2),
-                    "rate": m_main.group(3),
-                    "amount": m_main.group(4),
-                })
-                continue
-            # Sub-item row: "Tube lights 10.000 NO 220.00"
-            m_sub = re.match(
-                r"^([A-Za-z][A-Za-z0-9\s\-/()]+?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,5}\s+([\d,]+\.\d{2})\s*$",
-                line,
-            )
-            if m_sub:
-                items.append({
-                    "name": m_sub.group(1).strip(),
-                    "qty": m_sub.group(2),
-                    "rate": m_sub.group(3),
-                    "amount": "",
-                })
+        if m_tbl:
+            for line in m_tbl.group(1).splitlines():
+                line = line.strip()
+                if not line or line.startswith(("of", "Goods/Services", "Code UNIT")):
+                    continue
+                m_main = re.match(
+                    r"^\d+\s+(.*?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,5}\s+([\d,]+\.\d{2})\s+.*?([\d,]+\.\d{2})\s*$",
+                    line,
+                )
+                if m_main:
+                    items.append({
+                        "name": m_main.group(1).strip(),
+                        "qty": m_main.group(2),
+                        "rate": m_main.group(3),
+                        "amount": m_main.group(4),
+                    })
+                    continue
+                m_sub = re.match(
+                    r"^([A-Za-z][A-Za-z0-9\s\-/()]+?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,5}\s+([\d,]+\.\d{2})\s*$",
+                    line,
+                )
+                if m_sub:
+                    items.append({
+                        "name": m_sub.group(1).strip(),
+                        "qty": m_sub.group(2),
+                        "rate": m_sub.group(3),
+                        "amount": "",
+                    })
 
     return items
 
@@ -347,7 +345,7 @@ def zoho_contact_emails(customer_id):
 
 
 def add_contact_email(customer_id, email):
-    """Create a new contact person on the customer without re-sending existing contacts."""
+    """Create a new contact person on the customer (omit is_primary_contact so Zoho defaults safely)."""
     if not customer_id or not email:
         return
     emails, _ = zoho_contact_emails(customer_id)
@@ -360,7 +358,6 @@ def add_contact_email(customer_id, email):
                 "first_name": "",
                 "last_name": email.split("@")[0],
                 "email": email,
-                "is_primary_contact": False,
             },
         )
 

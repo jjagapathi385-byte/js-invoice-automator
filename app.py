@@ -1,5 +1,5 @@
 """PO -> Zoho invoice automation.
-Flow: upload PO -> match quotation (showing PO items at top & Quote items per card) -> preview -> confirm ->
+Flow: upload PO -> match quotation (showing PO items & Quote items) -> preview -> confirm ->
 create invoice linked to the quotation, update addresses/fields, attach PO, then email or draft."""
 import io
 import os
@@ -55,6 +55,7 @@ PO_RE = re.compile(
 )
 
 
+# ---------- access ----------
 def login_required(view):
     @wraps(view)
     def wrapper(*a, **kw):
@@ -74,6 +75,7 @@ def login():
     return render_template("login.html")
 
 
+# ---------- Zoho ----------
 _tok = {"v": None, "exp": 0}
 
 
@@ -125,18 +127,22 @@ def fetch_estimate_items(est_id):
         items = []
         for li in est.get("line_items", []) or []:
             name = (li.get("name") or li.get("description") or "").strip()
+            qty = li.get("quantity", "")
+            rate = li.get("rate", "")
+            amt = li.get("item_total", "")
             if name:
                 items.append({
                     "name": name,
-                    "qty": li.get("quantity", ""),
-                    "rate": li.get("rate", ""),
-                    "amount": li.get("item_total", ""),
+                    "qty": qty,
+                    "rate": rate,
+                    "amount": amt,
                 })
         return items
     except Exception:
         return []
 
 
+# ---------- PO reading ----------
 def read_pdf_text(f):
     data = f.read() if hasattr(f, "read") else f
     if isinstance(data, bytes):
@@ -154,31 +160,37 @@ def extract_po_items(text):
     items = []
 
     # 1. Paradise layout
-    m_para_tbl = re.search(r"HSN\s*Code.*?\n(.*?)(?=GRAND\s*TOTAL)", text, re.S | re.I)
-    if m_para_tbl:
-        for row in re.finditer(
-            r"(?:^|\n)\s*\d+\s+\d{4,6}\s+(.*?)\s+(?:Kilo\s*Gram|Number|Nos?|Set|Lot|Box|Mtr|Kg|Pcs|Unit)\s+\d{6,8}\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)",
-            m_para_tbl.group(1),
-            re.S | re.I,
-        ):
-            desc = re.sub(r"\s+", " ", row.group(1)).strip()
-            items.append({
-                "name": desc,
-                "qty": row.group(2),
-                "rate": row.group(3),
-                "amount": row.group(4),
-            })
+    if "Ship/Bill To Address" in text or "GRAND TOTAL" in text:
+        m_tbl = re.search(r"HSN\s*Code.*?\n(.*?)(?=GRAND\s*TOTAL)", text, re.S | re.I)
+        if m_tbl:
+            for row in re.finditer(
+                r"(?:^|\n)\s*\d+\s+\d{4,6}\s+(.*?)\s+(?:Kilo\s*Gram|Number|Nos?|Set|Lot|Box|Mtr|Kg|Pcs|Unit|Litre|Ltr|Each|Pair)\s+\d{6,8}\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)\s+\d+(?:\.\d+)?\s+[\d,.]+\s+\d+(?:\.\d+)?\s+[\d,.]+\s+([\d,.]+)",
+                m_tbl.group(1),
+                re.S | re.I,
+            ):
+                desc = re.sub(r"\s+", " ", row.group(1)).strip()
+                items.append({
+                    "name": desc,
+                    "qty": row.group(2),
+                    "rate": row.group(3),
+                    "amount": row.group(5),
+                })
 
-    # 2. Devyani layout
-    if not items:
-        m_dev_tbl = re.search(r"Gross\s*Val\s*Inc\s*Tax\s*\n(.*?)(?=\n\s*TOTAL\b)", text, re.S | re.I)
-        if m_dev_tbl:
-            for line in m_dev_tbl.group(1).splitlines():
+    # 2. Devyani layout (handles wrapped 4-line header ending in Goods/Services + Code UNIT...)
+    if not items and ("Delivery Warehouse:" in text or "Goods/Services" in text or "Gross Val Inc Tax" in text):
+        m_tbl = re.search(
+            r"(?:Goods/Services|Gross\s*Val\s*Inc\s*Tax)\s*\n(.*?)(?=\n\s*TOTAL\b)",
+            text,
+            re.S | re.I,
+        )
+        if m_tbl:
+            for line in m_tbl.group(1).splitlines():
                 line = line.strip()
-                if not line:
+                if not line or line.startswith("Code UNIT"):
                     continue
+                # Main line item: "1 Lights 1.000 A.U 2,200.00 2,200.00 ... 2,596.00"
                 m_main = re.match(
-                    r"^\d+\s+(.*?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,5}\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})",
+                    r"^\d+\s+(.*?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,5}\s+([\d,]+\.\d{2})\s+.*?([\d,]+\.\d{2})\s*$",
                     line,
                 )
                 if m_main:
@@ -189,8 +201,9 @@ def extract_po_items(text):
                         "amount": m_main.group(4),
                     })
                     continue
+                # Sub-item row: "Tube lights 10.000 NO 220.00"
                 m_sub = re.match(
-                    r"^([A-Za-z][A-Za-z0-9\s\-/()]+?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,5}\s+([\d,]+\.\d{2})",
+                    r"^([A-Za-z][A-Za-z0-9\s\-/()]+?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,5}\s+([\d,]+\.\d{2})\s*$",
                     line,
                 )
                 if m_sub:
@@ -208,6 +221,7 @@ def extract_addresses(text):
     """Extract Bill To and Ship To for Devyani and Paradise PO layouts."""
     bill = ship = ""
 
+    # 1. Devyani layout
     m_bill = re.search(
         r"Bill\s*To[\W_]*\s*(.*?)(?=Delivery\s*Warehouse\s*:)", text, re.S | re.I
     )
@@ -221,6 +235,7 @@ def extract_addresses(text):
         raw_ship = m_ship.group(1).replace("DeliveryAddress:", "")
         ship = _clean(raw_ship)
 
+    # 2. Paradise layout (2-column interleaved text)
     if not bill and "Ship/Bill To Address" in text:
         m_para = re.search(
             r"Ship/Bill\s*To\s*Address\s*\n(.*?)(?=Ship\s*LOC\s*GST)", text, re.S | re.I
@@ -251,7 +266,7 @@ def extract_addresses(text):
 
 
 def parse_po(text):
-    """Extract PO Number, Store Code, Total Amount, Buyer GSTIN, State, Addresses, and PO Items."""
+    """Extract PO Number, Store Code, Total Amount, Buyer GSTIN, State, Addresses, and Items."""
     po = {
         "po_number": None,
         "store": None,
@@ -300,6 +315,7 @@ def parse_po(text):
     return po
 
 
+# ---------- matching ----------
 def score(est, store, amount):
     s, reasons = 0, []
     text = f"{est.get('customer_name', '')} {est.get('reference_number', '')}"
@@ -320,6 +336,7 @@ def score(est, store, amount):
     return s, reasons
 
 
+# ---------- customer emails ----------
 def zoho_contact_emails(customer_id):
     if not customer_id:
         return [], []
@@ -330,6 +347,7 @@ def zoho_contact_emails(customer_id):
 
 
 def add_contact_email(customer_id, email):
+    """Create a new contact person on the customer without re-sending existing contacts."""
     if not customer_id or not email:
         return
     emails, _ = zoho_contact_emails(customer_id)
@@ -348,6 +366,7 @@ def add_contact_email(customer_id, email):
 
 
 def build_address_payload(addr_text, state_name=""):
+    """Format Street 1 payload for Zoho's /address/billing and /address/shipping endpoints."""
     clean = re.sub(r"\s+", " ", (addr_text or "")).strip(" ,")
     return {
         "attention": "",
@@ -362,6 +381,7 @@ def build_address_payload(addr_text, state_name=""):
     }
 
 
+# ---------- routes ----------
 @app.route("/", methods=["GET", "POST"])
 @login_required
 def index():
@@ -429,6 +449,7 @@ def index():
 @app.route("/preview", methods=["POST"])
 @login_required
 def preview():
+    """Build the full plan. Nothing is written to Zoho here."""
     est_id = request.form["estimate_id"]
     customer_id = request.form.get("customer_id", "")
     po_number = request.form.get("po_number", "").strip()
@@ -480,6 +501,7 @@ def preview():
 @app.route("/confirm", methods=["POST"])
 @login_required
 def confirm():
+    """Execute: create invoice, set addresses & GST fields, attach PO, then email or leave as draft."""
     p = PENDING.pop(request.form.get("token", ""), None)
     if not p:
         return render_template("error.html", msg="Preview expired. Start again.")

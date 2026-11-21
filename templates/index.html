@@ -5,18 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PO Invoice Automation</title>
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; max-width: 780px; margin: 24px auto; padding: 0 16px; color: #0f172a; background: #f8fafc; }
+    body { font-family: system-ui, -apple-system, sans-serif; max-width: 820px; margin: 24px auto; padding: 0 16px; color: #0f172a; background: #f8fafc; }
     h2 { margin-bottom: 16px; }
     .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+    .po-ref-card { border-left: 4px solid #2563eb; background: #f8fafc; }
     label { display: block; font-weight: 600; font-size: 0.9rem; margin-bottom: 4px; }
     input[type="text"], input[type="file"], select { width: 100%; padding: 9px 10px; border: 1px solid #cbd5e1; border-radius: 6px; box-sizing: border-box; margin-bottom: 12px; font-size: 0.95rem; }
     button { background: #2563eb; color: #fff; border: none; padding: 10px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 0.95rem; }
     button:hover { background: #1d4ed8; }
     .err { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; padding: 10px 12px; border-radius: 6px; margin-bottom: 14px; }
     .badge { display: inline-block; background: #e0e7ff; color: #3730a3; font-size: 0.78rem; padding: 2px 8px; border-radius: 999px; margin-right: 4px; font-weight: 600; }
-    .items-box { margin-top: 10px; padding: 10px 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.88rem; }
-    .items-box ul { margin: 6px 0 0 18px; padding: 0; }
-    .items-box li { margin-bottom: 3px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.86rem; background: #fff; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e2e8f0; }
+    th { background: #f1f5f9; font-weight: 600; color: #334155; }
+    .num { text-align: right; }
     .muted { color: #64748b; font-size: 0.88rem; }
   </style>
 </head>
@@ -45,21 +47,40 @@
   {% endif %}
 
   {% if fields %}
-    <div class="card">
-      <div>
+    <div class="card po-ref-card">
+      <div style="font-size: 0.95rem;">
         PO number: <strong>{{ fields.po_number or 'not found' }}</strong>
+        &middot; Store: <strong>{{ fields.store or 'not found' }}</strong>
         &middot; Buyer GSTIN: <strong>{{ fields.gstin or 'not found' }}</strong>
         &middot; Amount: <strong>{{ fields.amount or 'not found' }}</strong>
       </div>
-      {% if fields.get('items') %}
-        <div class="items-box">
-          <strong>PO Items ({{ fields['items']|length }}):</strong>
-          <ul>
-            {% for it in fields['items'] %}
-              <li>{{ it.name }} &mdash; Qty: {{ it.qty }}{% if it.rate %} @ {{ it.rate }}{% endif %}{% if it.amount %} (Total: {{ it.amount }}){% endif %}</li>
-            {% endfor %}
-          </ul>
+
+      {% if fields.po_items %}
+        <div style="margin-top: 12px;">
+          <strong>Items from PO ({{ fields.po_items|length }}):</strong>
+          <table>
+            <thead>
+              <tr>
+                <th>Item Description</th>
+                <th class="num">Qty</th>
+                <th class="num">Rate</th>
+                <th class="num">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for it in fields.po_items %}
+                <tr>
+                  <td>{{ it.name }}</td>
+                  <td class="num">{{ it.qty }}</td>
+                  <td class="num">{{ it.rate }}</td>
+                  <td class="num">{{ it.amount }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
+      {% else %}
+        <div class="muted" style="margin-top: 8px;">No line items detected in PO table.</div>
       {% endif %}
     </div>
   {% endif %}
@@ -77,18 +98,33 @@
         {% endfor %}
       </div>
 
-      {% if r.get('items') %}
-        <div class="items-box" style="margin-bottom:10px;">
-          <strong>Quotation Items ({{ r['items']|length }}):</strong>
-          <ul>
-            {% for qi in r['items'] %}
-              <li>{{ qi.name }} &mdash; Qty: {{ qi.qty }}{% if qi.rate %} @ {{ qi.rate }}{% endif %}{% if qi.amount %} (Total: {{ qi.amount }}){% endif %}</li>
-            {% endfor %}
-          </ul>
+      {% if r.quote_items %}
+        <div style="margin: 10px 0;">
+          <strong>Items from Quotation ({{ r.quote_items|length }}):</strong>
+          <table>
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th class="num">Qty</th>
+                <th class="num">Rate</th>
+                <th class="num">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for qi in r.quote_items %}
+                <tr>
+                  <td>{{ qi.name }}</td>
+                  <td class="num">{{ qi.qty }}</td>
+                  <td class="num">{{ qi.rate }}</td>
+                  <td class="num">{{ qi.amount }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
       {% endif %}
 
-      <form method="post" action="{{ url_for('preview') }}">
+      <form method="post" action="{{ url_for('preview') }}" style="margin-top:10px;">
         <input type="hidden" name="estimate_id" value="{{ r.id }}">
         <input type="hidden" name="customer_id" value="{{ r.customer_id }}">
         <input type="hidden" name="po_number" value="{{ fields.po_number or '' }}">

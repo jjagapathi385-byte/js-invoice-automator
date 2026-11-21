@@ -280,22 +280,18 @@ def add_contact_email(customer_id, email):
 
 
 def build_street1_address(addr_text, state_name=""):
-    """Split cleanly into Street 1 (< 100 chars) and Street 2 (< 100 chars) so Zoho code 15 never triggers."""
-    clean = (addr_text or "").strip()
-    if len(clean) <= 98:
-        street1, street2 = clean, ""
-    else:
-        cut = clean.rfind(",", 0, 98)
-        if cut < 40:
-            cut = clean.rfind(" ", 0, 98)
-        if cut < 40:
-            cut = 98
-        street1 = clean[:cut].strip(" ,")
-        street2 = clean[cut:].strip(" ,")[:98]
+    """Keep total address payload strictly < 100 chars (Zoho code 15 checks combined address length)."""
+    clean = re.sub(r"\s+", " ", (addr_text or "")).strip(" ,")
+    # Remove redundant "City:" / "State : ..." labels if needed to fit within 95 chars cleanly
+    if len(clean) > 95 and state_name:
+        clean = re.sub(r",?\s*State\s*:\s*" + re.escape(state_name), "", clean, flags=re.I).strip(" ,")
+    if len(clean) > 95:
+        clean = re.sub(r"\bCity\s*:\s*", "", clean, flags=re.I).strip(" ,")
+    street1 = clean[:95].strip(" ,")
     return {
         "attention": "",
         "address": street1,
-        "street2": street2,
+        "street2": "",
         "city": "",
         "state": state_name or "",
         "zip": "",

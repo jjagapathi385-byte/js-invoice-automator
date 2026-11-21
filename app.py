@@ -1,8 +1,12 @@
 """PO -> Zoho invoice automation.
 Flow: upload PO -> match quotation -> preview -> confirm -> create invoice linked to the quotation,
 update addresses/fields, attach PO, then email (if recipients) or leave as draft."""
-import io, os, re, time, secrets
-from datetime import datetime, date
+import io
+import os
+import re
+import secrets
+import time
+from datetime import date, datetime
 from functools import wraps
 
 import requests
@@ -28,8 +32,6 @@ STATUS_OPTIONS = [
     ("invoiced", "Invoiced"),
 ]
 
-# GSTIN prefix -> (Zoho place_of_supply code, full state name)
-# Note: Zoho Invoice India uses 'TS' or 'TG' depending on org settings; TS is standard in Zoho GST
 STATE_CODES = {
     "36": ("TS", "Telangana"),
     "37": ("AP", "Andhra Pradesh"),
@@ -135,18 +137,14 @@ def extract_addresses(text):
     """Extract Bill To and Ship To for Devyani and Paradise PO layouts."""
     bill = ship = ""
 
-    # --- 1. DEVYANI LAYOUT ---
-    # Bill To block runs from "Bill To..." up to "Delivery Warehouse:"
+    # 1. Devyani layout
     m_bill = re.search(
         r"Bill\s*To[^\n]*\n(.*?)(?=Delivery\s*Warehouse\s*:)", text, re.S | re.I
     )
     if m_bill:
-        raw_bill = m_bill.group(1)
-        # Strip store prefix like K593/Devyani International Limited -> keep company + full address
-        raw_bill = re.sub(r"^[A-Z]\d+/", "", raw_bill.strip())
+        raw_bill = re.sub(r"^[A-Z]\d+/", "", m_bill.group(1).strip())
         bill = _clean(raw_bill)
 
-    # Ship To block runs from "Delivery Warehouse:" up to "S.No" or "Material"
     m_ship = re.search(
         r"Delivery\s*Warehouse\s*:\s*(.*?)(?=\n\s*S\.?No\b|\n\s*Material\b)", text, re.S | re.I
     )
@@ -154,7 +152,7 @@ def extract_addresses(text):
         raw_ship = m_ship.group(1).replace("DeliveryAddress:", "")
         ship = _clean(raw_ship)
 
-    # --- 2. PARADISE LAYOUT (2-column interleaved text) ---
+    # 2. Paradise layout (2-column interleaved text)
     if not bill and "Ship/Bill To Address" in text:
         m_para = re.search(
             r"Ship/Bill\s*To\s*Address\s*\n(.*?)(?=Ship\s*LOC\s*GST)", text, re.S | re.I
@@ -163,24 +161,18 @@ def extract_addresses(text):
             lines = [l.strip() for l in m_para.group(1).splitlines() if l.strip()]
             right_col = []
             for line in lines:
-                # Skip supplier-only lines
                 if line.startswith(("V1", "J S INTEGRATED", "GSTIN:")):
                     continue
-                # Line with V-code + S-code: "V13955 S1123"
                 m_s = re.search(r"\b(S\d{3,4})\b", line)
                 if m_s:
                     right_col.append(m_s.group(1))
                     continue
-                # Interleaved supplier + buyer lines:
-                # '"12-4-131/5/b, Pragathi Nagar Road No.11,Moosapet, Kompally'
                 if "Moosapet," in line:
                     right_col.append(line.split("Moosapet,", 1)[1].strip())
                     continue
-                # 'Hyderabad, Telangana, 500018 SY No:103/B, Situated at Kompally,'
                 if "500018" in line:
                     right_col.append(line.split("500018", 1)[1].strip())
                     continue
-                # Pure buyer line (e.g., 'Hyderabad')
                 right_col.append(line)
             bill = "Paradise Food Court Private Limited, " + _clean("\n".join(right_col))
             ship = bill
@@ -210,7 +202,6 @@ def parse_po(text):
     if m:
         po["store"] = m.group(1).upper()
 
-    # Buyer GSTIN: Devyani ("Del.Warehouse GSTINNo :") or Paradise ("Ship LOC GST NO:")
     m = re.search(r"Del\.?\s*Warehouse\s*GSTIN\s*No\s*:?\s*" + GSTIN_RE.pattern, text, re.I)
     if not m:
         m = re.search(r"Ship\s*LOC\s*GST\s*NO\s*:?\s*" + GSTIN_RE.pattern, text, re.I)
@@ -223,7 +214,6 @@ def parse_po(text):
 
     po["bill_to"], po["ship_to"] = extract_addresses(text)
 
-    # If state wasn't resolved from GSTIN, detect from State : <NAME> or address text
     if not po["state_code"]:
         m_st = re.search(r"State\s*:\s*([A-Z ]+)", text, re.I)
         if m_st:
@@ -231,7 +221,6 @@ def parse_po(text):
             if st_key in STATE_NAME_TO_CODE:
                 po["state_code"], po["state_name"] = STATE_NAME_TO_CODE[st_key]
 
-    # Amount: Devyani ("Invoice Total\n0.00\n2,596.00") or Paradise ("Total Amount:\n...\n60,294.96")
     m_inv_tot = re.search(r"Invoice\s*Total\s*(?:[\d,]+\.\d{2}\s+)*([\d,]+\.\d{2})", text, re.I)
     m_tot_amt = re.search(r"Total\s*Amount\s*:?\s*(?:[\d,]+\.\d{2}\s+)*([\d,]+\.\d{2})", text, re.I)
     m_amt = m_inv_tot or m_tot_amt
@@ -290,3 +279,31 @@ def add_contact_email(customer_id, email):
             },
         )
 
+
+def build_street1_address(addr_text, state_name=""):
+    """Put the full address into Street 1 (address), overflowing into street2 only if > 100 chars."""
+    clean = (addr_text or "").strip()
+    return {
+        "attention": "",
+        "address": clean[:100],
+        "street2": clean[100:200] if len(clean) > 100 else "",
+        "city": "",
+        "state": state_name or "",
+        "zip": "",
+        "country": "India",
+        "fax": "",
+        "phone": "",
+    }
+
+
+# ---------- routes ----------
+@app.route("/", methods=["GET", "POST"])
+@login_required
+def index():
+    results, fields, error, po_token = [], {}, None, ""
+    status = request.values.get("status", "all")
+    if status not in dict(STATUS_OPTIONS):
+        status = "all"
+    if request.method == "POST":
+        f = request.files.get("po")
+        if not f or not f.filename.lower().endswith(".pdf"):

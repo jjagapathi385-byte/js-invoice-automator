@@ -137,13 +137,12 @@ def extract_addresses(text):
     """Extract Bill To and Ship To for Devyani and Paradise PO layouts."""
     bill = ship = ""
 
-    # 1. Devyani layout
+    # 1. Devyani layout: keep full Bill To block including store prefix (e.g., K593/Devyani International Limited)
     m_bill = re.search(
-        r"Bill\s*To[^\n]*\n(.*?)(?=Delivery\s*Warehouse\s*:)", text, re.S | re.I
+        r"Bill\s*To[\W_]*\s*(.*?)(?=Delivery\s*Warehouse\s*:)", text, re.S | re.I
     )
     if m_bill:
-        raw_bill = re.sub(r"^[A-Z]\d+/", "", m_bill.group(1).strip())
-        bill = _clean(raw_bill)
+        bill = _clean(m_bill.group(1))
 
     m_ship = re.search(
         r"Delivery\s*Warehouse\s*:\s*(.*?)(?=\n\s*S\.?No\b|\n\s*Material\b)", text, re.S | re.I

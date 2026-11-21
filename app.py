@@ -156,7 +156,7 @@ def _clean(block):
 
 
 def extract_po_items(text):
-    """Extract line items (name, qty, rate, amount) from Paradise and Devyani PO layouts."""
+    """Extract line items (name, qty, rate, amount) verified against Paradise and Devyani PO PDFs."""
     items = []
 
     # 1. Paradise layout
@@ -176,43 +176,43 @@ def extract_po_items(text):
                     "amount": row.group(5),
                 })
 
-    # 2. Devyani layout (handles wrapped 4-line header ending in Goods/Services + Code UNIT...)
-    if not items and ("Delivery Warehouse:" in text or "Goods/Services" in text or "Gross Val Inc Tax" in text):
+    # 2. Devyani layout: scan full text from S.No/Discription block down to TOTAL
+    if not items and ("Delivery Warehouse:" in text or "Discription" in text or "Goods/Services" in text):
         m_tbl = re.search(
-            r"(?:Goods/Services|Gross\s*Val\s*Inc\s*Tax)\s*\n(.*?)(?=\n\s*TOTAL\b)",
+            r"Discription\s+HSN/SAC.*?\n(.*?)(?=\n\s*TOTAL\b)",
             text,
             re.S | re.I,
         )
-        if m_tbl:
-            for line in m_tbl.group(1).splitlines():
-                line = line.strip()
-                if not line or line.startswith("Code UNIT"):
-                    continue
-                # Main line item: "1 Lights 1.000 A.U 2,200.00 2,200.00 ... 2,596.00"
-                m_main = re.match(
-                    r"^\d+\s+(.*?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,5}\s+([\d,]+\.\d{2})\s+.*?([\d,]+\.\d{2})\s*$",
-                    line,
-                )
-                if m_main:
-                    items.append({
-                        "name": m_main.group(1).strip(),
-                        "qty": m_main.group(2),
-                        "rate": m_main.group(3),
-                        "amount": m_main.group(4),
-                    })
-                    continue
-                # Sub-item row: "Tube lights 10.000 NO 220.00"
-                m_sub = re.match(
-                    r"^([A-Za-z][A-Za-z0-9\s\-/()]+?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,5}\s+([\d,]+\.\d{2})\s*$",
-                    line,
-                )
-                if m_sub:
-                    items.append({
-                        "name": m_sub.group(1).strip(),
-                        "qty": m_sub.group(2),
-                        "rate": m_sub.group(3),
-                        "amount": "",
-                    })
+        block = m_tbl.group(1) if m_tbl else text
+        for line in block.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # Main row: "1 Lights 1.000 A.U 2,200.00 2,200.00 2,200.00 0.00 0.00 0.00 0.00 18.00 396.00 0.00 0.00 2,596.00"
+            m_main = re.match(
+                r"^\d+\s+(.*?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,5}\s+([\d,]+\.\d{2})\s+.*?([\d,]+\.\d{2})\s*$",
+                line,
+            )
+            if m_main:
+                items.append({
+                    "name": m_main.group(1).strip(),
+                    "qty": m_main.group(2),
+                    "rate": m_main.group(3),
+                    "amount": m_main.group(4),
+                })
+                continue
+            # Sub-item row: "Tube lights 10.000 NO 220.00"
+            m_sub = re.match(
+                r"^([A-Za-z][A-Za-z0-9\s\-/()]+?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,5}\s+([\d,]+\.\d{2})\s*$",
+                line,
+            )
+            if m_sub:
+                items.append({
+                    "name": m_sub.group(1).strip(),
+                    "qty": m_sub.group(2),
+                    "rate": m_sub.group(3),
+                    "amount": "",
+                })
 
     return items
 

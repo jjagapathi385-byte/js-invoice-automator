@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import time
+import traceback
 from datetime import date, datetime
 from functools import wraps
 
@@ -384,28 +385,26 @@ def index():
     if status not in dict(STATUS_OPTIONS):
         status = "all"
     if request.method == "POST":
-        f = request.files.get("po")
-        if not f or not f.filename.lower().endswith(".pdf"):
-            error = "Upload the PO as a PDF."
-        else:
-            po_bytes = f.read()
-            text = read_pdf_text(po_bytes)
-            if not text.strip():
-                error = "No text in this PO (scanned?). Use a text PDF."
+        try:
+            f = request.files.get("po")
+            if not f or not f.filename.lower().endswith(".pdf"):
+                error = "Upload the PO as a PDF."
             else:
-                fields = parse_po(text)
-                po_token = secrets.token_urlsafe(16)
-                PENDING[po_token] = {"po_bytes": po_bytes, "po_name": f.filename, "fields": fields}
-                fields["store"] = request.form.get("store") or fields["store"]
-                fields["amount"] = fields["amount"] or (
-                    float(request.form["amount"].replace(",", ""))
-                    if request.form.get("amount")
-                    else None
-                )
-                if not fields["amount"] and not fields["store"]:
-                    error = "Could not find store or amount in this PO."
+                po_bytes = f.read()
+                text = read_pdf_text(po_bytes)
+                if not text.strip():
+                    error = "No text in this PO (scanned?). Use a text PDF."
                 else:
-                    try:
+                    fields = parse_po(text)
+                    po_token = secrets.token_urlsafe(16)
+                    PENDING[po_token] = {"po_bytes": po_bytes, "po_name": f.filename, "fields": fields}
+                    fields["store"] = (request.form.get("store") or "").strip() or fields["store"]
+                    raw_amt = (request.form.get("amount") or "").strip()
+                    if not fields["amount"] and raw_amt:
+                        fields["amount"] = float(raw_amt.replace(",", ""))
+                    if not fields["amount"] and not fields["store"]:
+                        error = "Could not find store or amount in this PO."
+                    else:
                         ests = fetch_estimates(status)
                         scored = []
                         for e in ests:
@@ -429,8 +428,8 @@ def index():
                             r_item["items"] = fetch_estimate_items(r_item["id"])
                         if not results:
                             error = "No matching quotations for this filter."
-                    except Exception as exc:
-                        error = f"Zoho search failed: {exc}"
+        except Exception as exc:
+            error = f"Error processing PO: {exc}"
     return render_template(
         "index.html",
         results=results,

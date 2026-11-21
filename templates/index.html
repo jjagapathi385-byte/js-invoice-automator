@@ -51,11 +51,11 @@
         &middot; Buyer GSTIN: <strong>{{ fields.gstin or 'not found' }}</strong>
         &middot; Amount: <strong>{{ fields.amount or 'not found' }}</strong>
       </div>
-      {% if fields.items %}
+      {% if fields.get('items') %}
         <div class="items-box">
-          <strong>PO Items ({{ fields.items|length }}):</strong>
+          <strong>PO Items ({{ fields['items']|length }}):</strong>
           <ul>
-            {% for it in fields.items %}
+            {% for it in fields['items'] %}
               <li>{{ it.name }} &mdash; Qty: {{ it.qty }}{% if it.rate %} @ {{ it.rate }}{% endif %}{% if it.amount %} (Total: {{ it.amount }}){% endif %}</li>
             {% endfor %}
           </ul>
@@ -77,11 +77,11 @@
         {% endfor %}
       </div>
 
-      {% if r.items %}
+      {% if r.get('items') %}
         <div class="items-box" style="margin-bottom:10px;">
-          <strong>Quotation Items ({{ r.items|length }}):</strong>
+          <strong>Quotation Items ({{ r['items']|length }}):</strong>
           <ul>
-            {% for qi in r.items %}
+            {% for qi in r['items'] %}
               <li>{{ qi.name }} &mdash; Qty: {{ qi.qty }}{% if qi.rate %} @ {{ qi.rate }}{% endif %}{% if qi.amount %} (Total: {{ qi.amount }}){% endif %}</li>
             {% endfor %}
           </ul>

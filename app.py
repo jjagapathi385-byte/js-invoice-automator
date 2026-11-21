@@ -280,17 +280,11 @@ def add_contact_email(customer_id, email):
 
 
 def build_street1_address(addr_text, state_name=""):
-    """Keep total address payload strictly < 100 chars (Zoho code 15 checks combined address length)."""
-    clean = re.sub(r"\s+", " ", (addr_text or "")).strip(" ,")
-    # Remove redundant "City:" / "State : ..." labels if needed to fit within 95 chars cleanly
-    if len(clean) > 95 and state_name:
-        clean = re.sub(r",?\s*State\s*:\s*" + re.escape(state_name), "", clean, flags=re.I).strip(" ,")
-    if len(clean) > 95:
-        clean = re.sub(r"\bCity\s*:\s*", "", clean, flags=re.I).strip(" ,")
-    street1 = clean[:95].strip(" ,")
+    """Put the full address into Street 1 (address) for Zoho's dedicated /address/billing & /shipping endpoints."""
+    clean = (addr_text or "").strip()
     return {
         "attention": "",
-        "address": street1,
+        "address": clean[:490],
         "street2": "",
         "city": "",
         "state": state_name or "",
@@ -421,7 +415,7 @@ def preview():
 @app.route("/confirm", methods=["POST"])
 @login_required
 def confirm():
-    """Execute: create invoice, set addresses & GST fields, attach PO, then email or leave as draft."""
+    """Execute: create invoice, set addresses via Zoho address sub-endpoints, attach PO, then email or draft."""
     p = PENDING.pop(request.form.get("token", ""), None)
     if not p:
         return render_template("error.html", msg="Preview expired. Start again.")
@@ -459,6 +453,7 @@ def confirm():
                 item["hsn_or_sac"] = li["hsn_or_sac"]
             line_items.append(item)
 
+        # 1. Create invoice WITHOUT billing_address/shipping_address objects (Zoho code 15 rejects objects here)
         today_str = date.today().isoformat()
         inv_payload = {
             "customer_id": est["customer_id"],
@@ -476,31 +471,26 @@ def confirm():
             inv_payload["gst_no"] = p["gstin"]
         if p.get("state_code"):
             inv_payload["place_of_supply"] = p["state_code"]
-        if p["bill_to"]:
-            inv_payload["billing_address"] = build_street1_address(
-                p["bill_to"], p.get("state_name", "")
-            )
-        if p["ship_to"]:
-            inv_payload["shipping_address"] = build_street1_address(
-                p["ship_to"], p.get("state_name", "")
-            )
 
         created = zh("POST", "/invoices", json=inv_payload)
         inv = created["invoice"]
         inv_id = inv["invoice_id"]
 
-        addr_update = {}
+        # 2. Set full Street 1 addresses using Zoho's dedicated address sub-endpoints (supports up to 500 chars)
         if p["bill_to"]:
-            addr_update["billing_address"] = build_street1_address(
-                p["bill_to"], p.get("state_name", "")
+            zh(
+                "PUT",
+                f"/invoices/{inv_id}/address/billing",
+                json=build_street1_address(p["bill_to"], p.get("state_name", "")),
             )
         if p["ship_to"]:
-            addr_update["shipping_address"] = build_street1_address(
-                p["ship_to"], p.get("state_name", "")
+            zh(
+                "PUT",
+                f"/invoices/{inv_id}/address/shipping",
+                json=build_street1_address(p["ship_to"], p.get("state_name", "")),
             )
-        if addr_update:
-            zh("PUT", f"/invoices/{inv_id}", json=addr_update)
 
+        # 3. Attach PO with can_send_in_mail=true
         if p["po_bytes"]:
             att_r = requests.post(
                 f"{API_URL}/invoices/{inv_id}/attachment",
@@ -512,6 +502,7 @@ def confirm():
             )
             att_r.raise_for_status()
 
+        # 4. Email (prepending greeting to Zoho's default template) or leave as draft
         if to:
             tpl = zh("GET", f"/invoices/{inv_id}/email")
             default_body = tpl.get("data", {}).get("body", "")

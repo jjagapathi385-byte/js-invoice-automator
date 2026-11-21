@@ -1,53 +1,104 @@
 <!doctype html>
-<html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>PO Invoice Automation</title>
-<style>
-body{font-family:system-ui,sans-serif;max-width:720px;margin:24px auto;padding:0 16px;color:#222}
-label{display:block;margin-top:14px;font-weight:600}
-input,select,button{font-size:16px;padding:10px;width:100%;box-sizing:border-box;margin-top:6px}
-button{background:#1f5fbf;color:#fff;border:0;border-radius:6px;margin-top:14px}
-.card{border:1px solid #ddd;border-radius:8px;padding:12px;margin-top:10px}
-.err{color:#b00;margin-top:12px}.muted{color:#666;font-size:14px}
-.badge{display:inline-block;background:#eef;padding:2px 8px;border-radius:10px;font-size:13px}
-</style></head>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PO Invoice Automation</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; max-width: 780px; margin: 24px auto; padding: 0 16px; color: #0f172a; background: #f8fafc; }
+    h2 { margin-bottom: 16px; }
+    .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+    label { display: block; font-weight: 600; font-size: 0.9rem; margin-bottom: 4px; }
+    input[type="text"], input[type="file"], select { width: 100%; padding: 9px 10px; border: 1px solid #cbd5e1; border-radius: 6px; box-sizing: border-box; margin-bottom: 12px; font-size: 0.95rem; }
+    button { background: #2563eb; color: #fff; border: none; padding: 10px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 0.95rem; }
+    button:hover { background: #1d4ed8; }
+    .err { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; padding: 10px 12px; border-radius: 6px; margin-bottom: 14px; }
+    .badge { display: inline-block; background: #e0e7ff; color: #3730a3; font-size: 0.78rem; padding: 2px 8px; border-radius: 999px; margin-right: 4px; font-weight: 600; }
+    .items-box { margin-top: 10px; padding: 10px 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.88rem; }
+    .items-box ul { margin: 6px 0 0 18px; padding: 0; }
+    .items-box li { margin-bottom: 3px; }
+    .muted { color: #64748b; font-size: 0.88rem; }
+  </style>
+</head>
 <body>
-<h2>PO Invoice Automation</h2>
-<form method="post" enctype="multipart/form-data">
-  <label>PO file (PDF)</label>
-  <input type="file" name="po" accept=".pdf" required>
-  <label>Store code (optional override)</label>
-  <input type="text" name="store" value="{{ fields.store or '' }}">
-  <label>Quotation status</label>
-  <select name="status">
-    {% for val, label in status_options %}
-      <option value="{{ val }}" {% if val == status %}selected{% endif %}>{{ label }}</option>
-    {% endfor %}
-  </select>
-  <button>Find matching quotations</button>
-</form>
+  <h2>PO Invoice Automation</h2>
 
-{% if error %}<p class="err">{{ error }}</p>{% endif %}
+  <form class="card" method="post" enctype="multipart/form-data">
+    <label for="po">PO file (PDF)</label>
+    <input id="po" name="po" type="file" accept=".pdf" required>
 
-{% if fields %}
-  <p class="muted">PO number: <b>{{ fields.po_number or 'not found' }}</b> ·
-     Buyer GSTIN: <b>{{ fields.gstin or 'not found' }}</b> · Amount: <b>{{ fields.amount or 'not found' }}</b></p>
-{% endif %}
+    <label for="store">Store code (optional override)</label>
+    <input id="store" name="store" type="text" value="{{ fields.store or '' }}" placeholder="e.g. K593 or S1123">
 
-{% for r in results %}
-  <div class="card">
-    <div><b>{{ r.number }}</b> — {{ r.customer }}</div>
-    <div class="muted">{{ r.date }} · {{ r.status }} · Total {{ "%.2f"|format(r.total|float) }}</div>
-    <div style="margin-top:6px">
-      <span class="badge">score {{ r.score }}</span>
-      {% for reason in r.reasons %}<span class="badge">{{ reason }}</span> {% endfor %}
+    <label for="status">Quotation status</label>
+    <select id="status" name="status">
+      {% for val, label in status_options %}
+        <option value="{{ val }}" {% if status == val %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+
+    <button type="submit">Find matching quotations</button>
+  </form>
+
+  {% if error %}
+    <div class="err">{{ error }}</div>
+  {% endif %}
+
+  {% if fields %}
+    <div class="card">
+      <div>
+        PO number: <strong>{{ fields.po_number or 'not found' }}</strong>
+        &middot; Buyer GSTIN: <strong>{{ fields.gstin or 'not found' }}</strong>
+        &middot; Amount: <strong>{{ fields.amount or 'not found' }}</strong>
+      </div>
+      {% if fields.items %}
+        <div class="items-box">
+          <strong>PO Items ({{ fields.items|length }}):</strong>
+          <ul>
+            {% for it in fields.items %}
+              <li>{{ it.name }} &mdash; Qty: {{ it.qty }}{% if it.rate %} @ {{ it.rate }}{% endif %}{% if it.amount %} (Total: {{ it.amount }}){% endif %}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
     </div>
-    <form method="post" action="{{ url_for('preview') }}">
-      <input type="hidden" name="estimate_id" value="{{ r.id }}">
-      <input type="hidden" name="customer_id" value="{{ r.customer_id }}">
-      <input type="hidden" name="po_token" value="{{ po_token }}">
-      <input type="hidden" name="po_number" value="{{ fields.po_number or '' }}">
-      <input type="hidden" name="gstin" value="{{ fields.gstin or '' }}">
-      <button>Review and create invoice</button>
-    </form>
-  </div>
-{% endfor %}
-</body></html>
+  {% endif %}
+
+  {% for r in results %}
+    <div class="card">
+      <div><strong>{{ r.number }}</strong> &mdash; {{ r.customer }}</div>
+      <div class="muted" style="margin:4px 0;">
+        {{ r.date }} &middot; {{ r.status }} &middot; Total {{ "%.2f"|format(r.total|float) }}
+      </div>
+      <div style="margin:6px 0;">
+        <span class="badge">score {{ r.score }}</span>
+        {% for reason in r.reasons %}
+          <span class="badge">{{ reason }}</span>
+        {% endfor %}
+      </div>
+
+      {% if r.items %}
+        <div class="items-box" style="margin-bottom:10px;">
+          <strong>Quotation Items ({{ r.items|length }}):</strong>
+          <ul>
+            {% for qi in r.items %}
+              <li>{{ qi.name }} &mdash; Qty: {{ qi.qty }}{% if qi.rate %} @ {{ qi.rate }}{% endif %}{% if qi.amount %} (Total: {{ qi.amount }}){% endif %}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
+
+      <form method="post" action="{{ url_for('preview') }}">
+        <input type="hidden" name="estimate_id" value="{{ r.id }}">
+        <input type="hidden" name="customer_id" value="{{ r.customer_id }}">
+        <input type="hidden" name="po_number" value="{{ fields.po_number or '' }}">
+        <input type="hidden" name="gstin" value="{{ fields.gstin or '' }}">
+        <input type="hidden" name="bill_to" value="{{ fields.bill_to or '' }}">
+        <input type="hidden" name="ship_to" value="{{ fields.ship_to or '' }}">
+        <input type="hidden" name="po_token" value="{{ po_token }}">
+        <button type="submit">Review and create invoice</button>
+      </form>
+    </div>
+  {% endfor %}
+</body>
+</html>

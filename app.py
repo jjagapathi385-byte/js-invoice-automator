@@ -1,6 +1,6 @@
 """PO -> Zoho invoice automation.
-Flow: upload PO -> match quotation -> preview -> confirm -> create invoice linked to the quotation,
-update addresses/fields, attach PO, then email (if recipients) or leave as draft."""
+Flow: upload PO -> match quotation (showing PO items & Quote items) -> preview -> confirm ->
+create invoice linked to the quotation, update addresses/fields, attach PO, then email or draft."""
 import io
 import os
 import re
@@ -120,6 +120,28 @@ def fetch_estimates(status):
     return out
 
 
+def fetch_estimate_items(est_id):
+    """Fetch line items for a matched quotation so they can be compared with PO items."""
+    try:
+        est = zh("GET", f"/estimates/{est_id}").get("estimate", {})
+        items = []
+        for li in est.get("line_items", []) or []:
+            name = (li.get("name") or li.get("description") or "").strip()
+            qty = li.get("quantity", "")
+            rate = li.get("rate", "")
+            amt = li.get("item_total", "")
+            if name:
+                items.append({
+                    "name": name,
+                    "qty": qty,
+                    "rate": rate,
+                    "amount": amt,
+                })
+        return items
+    except Exception:
+        return []
+
+
 # ---------- PO reading ----------
 def read_pdf_text(f):
     data = f.read() if hasattr(f, "read") else f
@@ -133,11 +155,67 @@ def _clean(block):
     return ", ".join(lines)
 
 
+def extract_po_items(text):
+    """Extract line items (name, qty, rate/amount) from Paradise and Devyani PO layouts."""
+    items = []
+
+    # 1. Paradise layout
+    if "Ship/Bill To Address" in text or "GRAND TOTAL" in text:
+        m_tbl = re.search(r"HSN\s*Code.*?\n(.*?)(?=GRAND\s*TOTAL)", text, re.S | re.I)
+        if m_tbl:
+            for row in re.finditer(
+                r"(?:^|\n)\s*\d+\s+\d{4,6}\s+(.*?)\s+(?:Kilo\s*Gram|Number|Nos?|Set|Lot|Box|Mtr|Kg|Pcs|Unit)\s+\d{6,8}\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)",
+                m_tbl.group(1),
+                re.S | re.I,
+            ):
+                desc = re.sub(r"\s+", " ", row.group(1)).strip()
+                items.append({
+                    "name": desc,
+                    "qty": row.group(2),
+                    "rate": row.group(3),
+                    "amount": row.group(4),
+                })
+
+    # 2. Devyani layout
+    if not items and ("Delivery Warehouse:" in text or "Gross Val Inc Tax" in text):
+        m_tbl = re.search(r"Gross\s*Val\s*Inc\s*Tax\s*\n(.*?)(?=\n\s*TOTAL\b)", text, re.S | re.I)
+        if m_tbl:
+            for line in m_tbl.group(1).splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                m_main = re.match(
+                    r"^\d+\s+(.*?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,5}\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})",
+                    line,
+                )
+                if m_main:
+                    items.append({
+                        "name": m_main.group(1).strip(),
+                        "qty": m_main.group(2),
+                        "rate": m_main.group(3),
+                        "amount": m_main.group(4),
+                    })
+                    continue
+                m_sub = re.match(
+                    r"^([A-Za-z][A-Za-z0-9\s\-/()]+?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,5}\s+([\d,]+\.\d{2})",
+                    line,
+                )
+                if m_sub:
+                    items.append({
+                        "name": m_sub.group(1).strip(),
+                        "qty": m_sub.group(2),
+                        "rate": m_sub.group(3),
+                        "amount": "",
+                    })
+
+    return items
+
+
 def extract_addresses(text):
     """Extract Bill To and Ship To for Devyani and Paradise PO layouts."""
     bill = ship = ""
 
-    # 1. Devyani layout: keep full Bill To block including store prefix (e.g., K593/Devyani International Limited)
+    # 1. Devyani layout
     m_bill = re.search(
         r"Bill\s*To[\W_]*\s*(.*?)(?=Delivery\s*Warehouse\s*:)", text, re.S | re.I
     )
@@ -182,7 +260,7 @@ def extract_addresses(text):
 
 
 def parse_po(text):
-    """Extract PO Number, Store Code, Total Amount, Buyer GSTIN, State, and Addresses."""
+    """Extract PO Number, Store Code, Total Amount, Buyer GSTIN, State, Addresses, and Items."""
     po = {
         "po_number": None,
         "store": None,
@@ -192,6 +270,7 @@ def parse_po(text):
         "state_name": "",
         "bill_to": "",
         "ship_to": "",
+        "items": [],
     }
     m = PO_RE.search(text)
     if m:
@@ -212,6 +291,7 @@ def parse_po(text):
         po["state_name"] = name
 
     po["bill_to"], po["ship_to"] = extract_addresses(text)
+    po["items"] = extract_po_items(text)
 
     if not po["state_code"]:
         m_st = re.search(r"State\s*:\s*([A-Z ]+)", text, re.I)
@@ -279,12 +359,12 @@ def add_contact_email(customer_id, email):
         )
 
 
-def build_street1_address(addr_text, state_name=""):
-    """Put the full address into Street 1 (address) for Zoho's dedicated /address/billing & /shipping endpoints."""
-    clean = (addr_text or "").strip()
+def build_address_payload(addr_text, state_name=""):
+    """Format Street 1 payload for Zoho's /address/billing and /address/shipping endpoints."""
+    clean = re.sub(r"\s+", " ", (addr_text or "")).strip(" ,")
     return {
         "attention": "",
-        "address": clean[:490],
+        "address": clean,
         "street2": "",
         "city": "",
         "state": state_name or "",
@@ -345,6 +425,8 @@ def index():
                                     }
                                 )
                         results = sorted(scored, key=lambda x: x["score"], reverse=True)[:10]
+                        for r_item in results:
+                            r_item["items"] = fetch_estimate_items(r_item["id"])
                         if not results:
                             error = "No matching quotations for this filter."
                     except Exception as exc:
@@ -415,7 +497,7 @@ def preview():
 @app.route("/confirm", methods=["POST"])
 @login_required
 def confirm():
-    """Execute: create invoice, set addresses via Zoho address sub-endpoints, attach PO, then email or draft."""
+    """Execute: create invoice, set addresses & GST fields, attach PO, then email or leave as draft."""
     p = PENDING.pop(request.form.get("token", ""), None)
     if not p:
         return render_template("error.html", msg="Preview expired. Start again.")
@@ -453,7 +535,6 @@ def confirm():
                 item["hsn_or_sac"] = li["hsn_or_sac"]
             line_items.append(item)
 
-        # 1. Create invoice WITHOUT billing_address/shipping_address objects (Zoho code 15 rejects objects here)
         today_str = date.today().isoformat()
         inv_payload = {
             "customer_id": est["customer_id"],
@@ -476,21 +557,19 @@ def confirm():
         inv = created["invoice"]
         inv_id = inv["invoice_id"]
 
-        # 2. Set full Street 1 addresses using Zoho's dedicated address sub-endpoints (supports up to 500 chars)
         if p["bill_to"]:
             zh(
                 "PUT",
                 f"/invoices/{inv_id}/address/billing",
-                json=build_street1_address(p["bill_to"], p.get("state_name", "")),
+                json=build_address_payload(p["bill_to"], p.get("state_name", "")),
             )
         if p["ship_to"]:
             zh(
                 "PUT",
                 f"/invoices/{inv_id}/address/shipping",
-                json=build_street1_address(p["ship_to"], p.get("state_name", "")),
+                json=build_address_payload(p["ship_to"], p.get("state_name", "")),
             )
 
-        # 3. Attach PO with can_send_in_mail=true
         if p["po_bytes"]:
             att_r = requests.post(
                 f"{API_URL}/invoices/{inv_id}/attachment",
@@ -502,7 +581,6 @@ def confirm():
             )
             att_r.raise_for_status()
 
-        # 4. Email (prepending greeting to Zoho's default template) or leave as draft
         if to:
             tpl = zh("GET", f"/invoices/{inv_id}/email")
             default_body = tpl.get("data", {}).get("body", "")

@@ -280,12 +280,22 @@ def add_contact_email(customer_id, email):
 
 
 def build_street1_address(addr_text, state_name=""):
-    """Put the full address into Street 1 (address), overflowing into street2 only if > 100 chars."""
+    """Split cleanly into Street 1 (< 100 chars) and Street 2 (< 100 chars) so Zoho code 15 never triggers."""
     clean = (addr_text or "").strip()
+    if len(clean) <= 98:
+        street1, street2 = clean, ""
+    else:
+        cut = clean.rfind(",", 0, 98)
+        if cut < 40:
+            cut = clean.rfind(" ", 0, 98)
+        if cut < 40:
+            cut = 98
+        street1 = clean[:cut].strip(" ,")
+        street2 = clean[cut:].strip(" ,")[:98]
     return {
         "attention": "",
-        "address": clean[:100],
-        "street2": clean[100:200] if len(clean) > 100 else "",
+        "address": street1,
+        "street2": street2,
         "city": "",
         "state": state_name or "",
         "zip": "",

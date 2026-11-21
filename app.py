@@ -176,10 +176,10 @@ def extract_po_items(text):
                     "amount": row.group(5),
                 })
 
-    # 2. Devyani layout
-    if not items and ("Delivery Warehouse:" in text or "Gross Val Inc Tax" in text):
+    # 2. Devyani layout (scans from Discription/Goods/Services/Gross Val Inc Tax down to TOTAL)
+    if not items and ("Delivery Warehouse:" in text or "Gross Val Inc Tax" in text or "Goods/Services" in text):
         m_tbl = re.search(
-            r"Gross\s*Val\s*Inc\s*Tax\s*\n(.*?)(?=\n\s*TOTAL\b)",
+            r"(?:Discription\s+HSN/SAC|Gross\s*Val\s*Inc\s*Tax|Goods/Services)\s*\n(.*?)(?=\n\s*TOTAL\b)",
             text,
             re.S | re.I,
         )
@@ -378,6 +378,24 @@ def build_address_payload(addr_text, state_name=""):
     }
 
 
+def apply_greeting(default_body, greet_name):
+    """Replace Zoho template's existing 'Dear ...,' greeting instead of duplicating it."""
+    if not greet_name:
+        return default_body
+    # Replace an existing "Dear <anything>," in Zoho's default template
+    updated, count = re.subn(
+        r"(Dear\s+)([^,<\r\n]+)(,)",
+        rf"\g<1>{greet_name}\g<3>",
+        default_body,
+        count=1,
+        flags=re.I,
+    )
+    if count:
+        return updated
+    prefix = f"<p>Dear {greet_name},</p>" if "<" in default_body else f"Dear {greet_name},\n\n"
+    return prefix + default_body
+
+
 # ---------- routes ----------
 @app.route("/", methods=["GET", "POST"])
 @login_required
@@ -504,16 +522,23 @@ def confirm():
         return render_template("error.html", msg="Preview expired. Start again.")
 
     try:
-        to = [e.strip() for e in request.form.getlist("to") if e.strip()]
-        cc = [e.strip() for e in request.form.getlist("cc") if e.strip()]
+        # Collect To and CC recipients (supports comma/semicolon-separated addresses too)
+        to = [e.strip() for raw in request.form.getlist("to") for e in re.split(r"[,;]+", raw) if e.strip()]
+        cc = [e.strip() for raw in request.form.getlist("cc") for e in re.split(r"[,;]+", raw) if e.strip()]
         new_to = request.form.get("new_to", "").strip()
         if new_to:
-            to.append(new_to)
-            add_contact_email(p["customer_id"], new_to)
+            for e in re.split(r"[,;]+", new_to):
+                e = e.strip()
+                if e and e not in to:
+                    to.append(e)
+                    add_contact_email(p["customer_id"], e)
         new_cc = request.form.get("new_cc", "").strip()
         if new_cc:
-            cc.append(new_cc)
-            add_contact_email(p["customer_id"], new_cc)
+            for e in re.split(r"[,;]+", new_cc):
+                e = e.strip()
+                if e and e not in cc:
+                    cc.append(e)
+                    add_contact_email(p["customer_id"], e)
         greet_name = request.form.get("greet_name", "").strip()
 
         p["bill_to"] = request.form.get("bill_to", p["bill_to"]).strip()
@@ -588,18 +613,15 @@ def confirm():
             default_subject = tpl.get("data", {}).get(
                 "subject", f"Invoice {inv.get('invoice_number', '')} from {SUPPLIER}"
             )
-            greeting = (
-                f"<p>Dear {greet_name or p['customer_name']},</p>"
-                if "<" in default_body
-                else f"Dear {greet_name or p['customer_name']},\n\n"
-            )
+            final_body = apply_greeting(default_body, greet_name)
             mail = {
                 "to_mail_ids": to,
-                "cc_mail_ids": cc,
                 "subject": default_subject,
-                "body": greeting + default_body,
+                "body": final_body,
                 "attach_pdf": True,
             }
+            if cc:
+                mail["cc_mail_ids"] = cc
             mail_r = requests.post(
                 f"{API_URL}/invoices/{inv_id}/email",
                 headers={"Authorization": f"Zoho-oauthtoken {zoho_token()}"},
@@ -608,7 +630,8 @@ def confirm():
                 timeout=60,
             )
             mail_r.raise_for_status()
-            result = "Invoice created and emailed to " + ", ".join(to)
+            cc_note = f" (CC: {', '.join(cc)})" if cc else ""
+            result = f"Invoice created and emailed to {', '.join(to)}{cc_note}"
         else:
             result = "Invoice saved as draft (no recipients added)."
 

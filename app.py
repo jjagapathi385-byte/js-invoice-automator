@@ -282,3 +282,11 @@ def add_contact_email(customer_id, email):
             "POST",
             "/contacts/contactpersons",
             json={
+                "contact_id": customer_id,
+                "first_name": "",
+                "last_name": email.split("@")[0],
+                "email": email,
+                "is_primary_contact": False,
+            },
+        )
+

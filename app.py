@@ -32,8 +32,9 @@ STATUS_OPTIONS = [
     ("invoiced", "Invoiced"),
 ]
 
+# Your Zoho org uses TG for Telangana (as noted in your project overview)
 STATE_CODES = {
-    "36": ("TS", "Telangana"),
+    "36": ("TG", "Telangana"),
     "37": ("AP", "Andhra Pradesh"),
     "29": ("KA", "Karnataka"),
     "27": ("MH", "Maharashtra"),
@@ -160,7 +161,7 @@ def resolve_tax_id(is_interstate, fallback_tax_id=""):
                 continue
             if "igst" in t_name or t_type == "tax":
                 igst_matches.append(t_id)
-            if t_type == "tax_group" or "gst" in t_name and "igst" not in t_name:
+            if t_type == "tax_group" or ("gst" in t_name and "igst" not in t_name):
                 gst_matches.append(t_id)
         if is_interstate and igst_matches:
             return igst_matches[0]
@@ -428,25 +429,47 @@ def sync_customer_details(customer_id, gstin="", state_code="", state_name="", b
     """Update the Zoho customer record directly with new GSTIN, Place of Supply, and Bill/Ship addresses."""
     if not customer_id:
         return
+    existing = zh("GET", f"/contacts/{customer_id}").get("contact", {})
+    contact_name = existing.get("contact_name", "")
     payload = {}
+    if contact_name:
+        payload["contact_name"] = contact_name
     if gstin:
         payload["gst_treatment"] = "business_gst"
         payload["gst_no"] = gstin
     if state_code:
         payload["place_of_contact"] = state_code
     if bill_to:
-        payload["billing_address"] = build_address_payload(bill_to, state_name)
+        payload["billing_address"] = {
+            "address": re.sub(r"\s+", " ", bill_to).strip(" ,"),
+            "country": "India",
+        }
     if ship_to:
-        payload["shipping_address"] = build_address_payload(ship_to, state_name)
+        payload["shipping_address"] = {
+            "address": re.sub(r"\s+", " ", ship_to).strip(" ,"),
+            "country": "India",
+        }
     if payload:
-        zh("PUT", f"/contacts/{customer_id}", json=payload)
+        try:
+            zh("PUT", f"/contacts/{customer_id}", json=payload)
+        except requests.HTTPError as exc:
+            # Fallback if org uses TS instead of TG or rejects inline address sub-dicts
+            if exc.response is not None and "118068" in exc.response.text:
+                if payload.get("place_of_contact") == "TG":
+                    payload["place_of_contact"] = "TS"
+                elif payload.get("place_of_contact") == "TS":
+                    payload["place_of_contact"] = "TG"
+                else:
+                    payload.pop("place_of_contact", None)
+                zh("PUT", f"/contacts/{customer_id}", json=payload)
+            else:
+                raise
 
 
 def apply_greeting(default_body, greet_name):
     """Strip any existing 'Dear ...,' line (including HTML tags around it) and replace cleanly with greet_name."""
     if not greet_name:
         return default_body
-    # Remove any HTML paragraph/div/span/br line containing 'Dear ...,'
     cleaned = re.sub(
         r"(?:<(?:p|div|span|b|strong)[^>]*>\s*)?Dear\b[^<\r\n]*?(?:,\s*|\s*<br\s*/?>\s*)(?:</(?:p|div|span|b|strong)>\s*)?",
         "",
@@ -634,9 +657,9 @@ def confirm():
             ship_to=p["ship_to"],
         )
 
-        # 2. Fetch quotation and switch tax_id to IGST (interstate) vs CGST+SGST (Telangana / TS)
+        # 2. Fetch quotation and switch tax_id to IGST (interstate) vs CGST+SGST (Telangana)
         est = zh("GET", f"/estimates/{p['estimate_id']}")["estimate"]
-        is_interstate = bool(p.get("state_code") and p["state_code"] != "TS")
+        is_interstate = bool(p.get("state_code") and p["state_code"] not in ("TG", "TS"))
         resolved_tax = resolve_tax_id(is_interstate)
 
         line_items = []
@@ -675,7 +698,17 @@ def confirm():
         if p.get("state_code"):
             inv_payload["place_of_supply"] = p["state_code"]
 
-        created = zh("POST", "/invoices", json=inv_payload)
+        try:
+            created = zh("POST", "/invoices", json=inv_payload)
+        except requests.HTTPError as exc:
+            if exc.response is not None and "118068" in exc.response.text:
+                if inv_payload.get("place_of_supply") == "TG":
+                    inv_payload["place_of_supply"] = "TS"
+                elif inv_payload.get("place_of_supply") == "TS":
+                    inv_payload["place_of_supply"] = "TG"
+                created = zh("POST", "/invoices", json=inv_payload)
+            else:
+                raise
         inv = created["invoice"]
         inv_id = inv["invoice_id"]
 

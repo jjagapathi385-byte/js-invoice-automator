@@ -1,6 +1,6 @@
 """PO -> Zoho invoice automation.
 Flow: upload PO -> match quotation (showing PO items & Quote items) -> preview -> confirm ->
-create invoice linked to the quotation, update addresses/fields, attach PO, then email or draft."""
+sync customer GST/addresses, create invoice with matching IGST/CGST+SGST, attach PO, then email or draft."""
 import io
 import os
 import re
@@ -142,6 +142,35 @@ def fetch_estimate_items(est_id):
         return []
 
 
+def resolve_tax_id(is_interstate, fallback_tax_id=""):
+    """Fetch Zoho Invoice taxes and pick the matching 18% IGST (interstate) or 18% GST (intrastate) tax_id."""
+    try:
+        taxes = zh("GET", "/settings/taxes").get("taxes", []) or []
+        target_pct = 18.0
+        igst_matches = []
+        gst_matches = []
+        for t in taxes:
+            pct = float(t.get("tax_percentage") or 0)
+            if abs(pct - target_pct) > 0.01:
+                continue
+            t_type = (t.get("tax_type") or "").lower()
+            t_name = (t.get("tax_name") or "").upper()
+            t_id = t.get("tax_id")
+            if not t_id:
+                continue
+            if "igst" in t_name or t_type == "tax":
+                igst_matches.append(t_id)
+            if t_type == "tax_group" or "gst" in t_name and "igst" not in t_name:
+                gst_matches.append(t_id)
+        if is_interstate and igst_matches:
+            return igst_matches[0]
+        if not is_interstate and gst_matches:
+            return gst_matches[0]
+    except Exception:
+        pass
+    return fallback_tax_id
+
+
 # ---------- PO reading ----------
 def read_pdf_text(f):
     data = f.read() if hasattr(f, "read") else f
@@ -176,7 +205,7 @@ def extract_po_items(text):
                     "amount": row.group(5),
                 })
 
-    # 2. Devyani layout (handles both spaced and concatenated pypdf tokens)
+    # 2. Devyani layout
     if not items and ("Delivery Warehouse:" in text or "Gross Val Inc Tax" in text or "Goods/Services" in text):
         m_tbl = re.search(
             r"(?:Discription|Description|Gross\s*Val\s*Inc\s*Tax|Goods/Services).*?\n(.*?)(?=\n\s*TOTAL\b)",
@@ -188,7 +217,6 @@ def extract_po_items(text):
                 line = line.strip()
                 if not line or re.match(r"^(?:of|Goods/Services|Code\s*UNIT|S\.?No|Material)", line, re.I):
                     continue
-                # Main row: "1 Lights 1.000 A.U 2,200.00 ... 2,596.00" (also handles optional material code)
                 m_main = re.match(
                     r"^\d+\s+(?:\d+\s+)?(.*?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,6}\s+([\d,]+\.\d{2})\s+.*?([\d,]+\.\d{2})\s*$",
                     line,
@@ -201,7 +229,6 @@ def extract_po_items(text):
                         "amount": m_main.group(4),
                     })
                     continue
-                # Sub-item row: "Tube lights 10.000 NO 220.00"
                 m_sub = re.match(
                     r"^([A-Za-z][A-Za-z0-9\s\-/().,&]+?)\s+(\d+(?:\.\d+)?)\s+[A-Z.]{1,6}\s+([\d,]+\.\d{2})(?:\s+([\d,]+\.\d{2}))?\s*$",
                     line,
@@ -214,7 +241,7 @@ def extract_po_items(text):
                         "amount": m_sub.group(4) or "",
                     })
 
-    # 3. Broad fallback across entire text if table headers varied
+    # 3. Broad fallback
     if not items:
         for line in text.splitlines():
             line = line.strip()
@@ -252,7 +279,7 @@ def extract_addresses(text):
         raw_ship = m_ship.group(1).replace("DeliveryAddress:", "")
         ship = _clean(raw_ship)
 
-    # 2. Paradise layout (2-column interleaved text)
+    # 2. Paradise layout
     if not bill and "Ship/Bill To Address" in text:
         m_para = re.search(
             r"Ship/Bill\s*To\s*Address\s*\n(.*?)(?=Ship\s*LOC\s*GST)", text, re.S | re.I
@@ -353,7 +380,7 @@ def score(est, store, amount):
     return s, reasons
 
 
-# ---------- customer emails ----------
+# ---------- customer emails & profile sync ----------
 def zoho_contact_emails(customer_id):
     if not customer_id:
         return [], []
@@ -364,7 +391,7 @@ def zoho_contact_emails(customer_id):
 
 
 def add_contact_email(customer_id, email):
-    """Save a new primary/To email to the customer's Zoho contact persons."""
+    """Save a new To email to the customer's Zoho contact persons."""
     if not customer_id or not email:
         return
     emails, _ = zoho_contact_emails(customer_id)
@@ -382,7 +409,7 @@ def add_contact_email(customer_id, email):
 
 
 def build_address_payload(addr_text, state_name=""):
-    """Format Street 1 payload for Zoho's /address/billing and /address/shipping endpoints."""
+    """Format Street 1 payload for Zoho's address endpoints."""
     clean = re.sub(r"\s+", " ", (addr_text or "")).strip(" ,")
     return {
         "attention": "",
@@ -397,21 +424,39 @@ def build_address_payload(addr_text, state_name=""):
     }
 
 
+def sync_customer_details(customer_id, gstin="", state_code="", state_name="", bill_to="", ship_to=""):
+    """Update the Zoho customer record directly with new GSTIN, Place of Supply, and Bill/Ship addresses."""
+    if not customer_id:
+        return
+    payload = {}
+    if gstin:
+        payload["gst_treatment"] = "business_gst"
+        payload["gst_no"] = gstin
+    if state_code:
+        payload["place_of_contact"] = state_code
+    if bill_to:
+        payload["billing_address"] = build_address_payload(bill_to, state_name)
+    if ship_to:
+        payload["shipping_address"] = build_address_payload(ship_to, state_name)
+    if payload:
+        zh("PUT", f"/contacts/{customer_id}", json=payload)
+
+
 def apply_greeting(default_body, greet_name):
-    """Replace Zoho template's existing 'Dear ...,' greeting instead of duplicating it."""
+    """Strip any existing 'Dear ...,' line (including HTML tags around it) and replace cleanly with greet_name."""
     if not greet_name:
         return default_body
-    updated, count = re.subn(
-        r"(Dear\s+)([^,<\r\n]+)(,)",
-        rf"\g<1>{greet_name}\g<3>",
+    # Remove any HTML paragraph/div/span/br line containing 'Dear ...,'
+    cleaned = re.sub(
+        r"(?:<(?:p|div|span|b|strong)[^>]*>\s*)?Dear\b[^<\r\n]*?(?:,\s*|\s*<br\s*/?>\s*)(?:</(?:p|div|span|b|strong)>\s*)?",
+        "",
         default_body,
         count=1,
         flags=re.I,
-    )
-    if count:
-        return updated
-    prefix = f"<p>Dear {greet_name},</p>" if "<" in default_body else f"Dear {greet_name},\n\n"
-    return prefix + default_body
+    ).lstrip()
+    if "<" in cleaned:
+        return f"<p>Dear {greet_name},</p>\n{cleaned}"
+    return f"Dear {greet_name},\n\n{cleaned}"
 
 
 # ---------- routes ----------
@@ -495,7 +540,7 @@ def preview():
     if est.get("invoiced") or est.get("status") == "invoiced":
         return render_template("error.html", msg="This quotation is already converted to an invoice.")
 
-    gstin = po.get("gstin") or request.form.get("gstin", "")
+    gstin = (po.get("gstin") or request.form.get("gstin", "")).strip()
     gst_prefix = gstin[:2] if gstin else ""
     state_code, state_name = STATE_CODES.get(
         gst_prefix, (po.get("state_code", ""), po.get("state_name", ""))
@@ -534,13 +579,12 @@ def preview():
 @app.route("/confirm", methods=["POST"])
 @login_required
 def confirm():
-    """Execute: create invoice, set addresses & GST fields, attach PO, then email or leave as draft."""
+    """Execute: sync customer details, create invoice with IGST/GST, attach PO, then email or leave as draft."""
     p = PENDING.pop(request.form.get("token", ""), None)
     if not p:
         return render_template("error.html", msg="Preview expired. Start again.")
 
     try:
-        # Collect To recipients (and save new_to to Zoho customer contacts)
         to = [e.strip() for raw in request.form.getlist("to") for e in re.split(r"[,;]+", raw) if e.strip()]
         new_to = request.form.get("new_to", "").strip()
         if new_to:
@@ -550,7 +594,6 @@ def confirm():
                     to.append(e)
                     add_contact_email(p["customer_id"], e)
 
-        # Collect CC recipients from any CC input field (do NOT save CC addresses to Zoho customer contacts)
         cc_raw_list = (
             request.form.getlist("cc")
             + request.form.getlist("cc_emails")
@@ -567,8 +610,35 @@ def confirm():
         greet_name = request.form.get("greet_name", "").strip()
         p["bill_to"] = request.form.get("bill_to", p["bill_to"]).strip()
         p["ship_to"] = request.form.get("ship_to", p["ship_to"]).strip()
+        if request.form.get("gstin"):
+            p["gstin"] = request.form.get("gstin", "").strip()
+            gst_prefix = p["gstin"][:2]
+            if gst_prefix in STATE_CODES:
+                p["state_code"], p["state_name"] = STATE_CODES[gst_prefix]
+        if request.form.get("state_code"):
+            p["state_code"] = request.form.get("state_code", "").strip().upper()
+            for code, name in STATE_CODES.values():
+                if code == p["state_code"]:
+                    p["state_name"] = name
+                    break
 
+        cust_id = p.get("customer_id", "")
+
+        # 1. Update Zoho Customer record directly with new GSTIN, Place of Supply, and Bill/Ship addresses
+        sync_customer_details(
+            cust_id,
+            gstin=p.get("gstin", ""),
+            state_code=p.get("state_code", ""),
+            state_name=p.get("state_name", ""),
+            bill_to=p["bill_to"],
+            ship_to=p["ship_to"],
+        )
+
+        # 2. Fetch quotation and switch tax_id to IGST (interstate) vs CGST+SGST (Telangana / TS)
         est = zh("GET", f"/estimates/{p['estimate_id']}")["estimate"]
+        is_interstate = bool(p.get("state_code") and p["state_code"] != "TS")
+        resolved_tax = resolve_tax_id(is_interstate)
+
         line_items = []
         for li in est.get("line_items", []):
             item = {
@@ -579,7 +649,9 @@ def confirm():
             }
             if li.get("item_id"):
                 item["item_id"] = li["item_id"]
-            if li.get("tax_id"):
+            if resolved_tax:
+                item["tax_id"] = resolved_tax
+            elif li.get("tax_id"):
                 item["tax_id"] = li["tax_id"]
             if li.get("hsn_or_sac"):
                 item["hsn_or_sac"] = li["hsn_or_sac"]
@@ -607,6 +679,7 @@ def confirm():
         inv = created["invoice"]
         inv_id = inv["invoice_id"]
 
+        # 3. Also set invoice-level Street 1 billing & shipping addresses
         if p["bill_to"]:
             zh(
                 "PUT",
@@ -620,6 +693,7 @@ def confirm():
                 json=build_address_payload(p["ship_to"], p.get("state_name", "")),
             )
 
+        # 4. Attach PO with can_send_in_mail=true
         if p["po_bytes"]:
             att_r = requests.post(
                 f"{API_URL}/invoices/{inv_id}/attachment",
@@ -631,6 +705,7 @@ def confirm():
             )
             att_r.raise_for_status()
 
+        # 5. Send email (with single clean greeting) or save as draft
         if to:
             tpl = zh("GET", f"/invoices/{inv_id}/email")
             default_body = tpl.get("data", {}).get("body", "")

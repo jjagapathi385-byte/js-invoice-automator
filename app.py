@@ -1,6 +1,6 @@
 """PO -> Zoho invoice automation.
 Flow: upload PO -> match quotation (showing PO items & Quote items) -> preview -> confirm ->
-sync customer GST/addresses, create invoice with matching IGST/CGST+SGST, attach PO, then email or draft."""
+sync customer GST/addresses, create invoice linked to quotation (marking quote Invoiced), attach PO, then email or draft."""
 import io
 import os
 import re
@@ -32,7 +32,6 @@ STATUS_OPTIONS = [
     ("invoiced", "Invoiced"),
 ]
 
-# Your Zoho org uses TG for Telangana (as noted in your project overview)
 STATE_CODES = {
     "36": ("TG", "Telangana"),
     "37": ("AP", "Andhra Pradesh"),
@@ -453,7 +452,6 @@ def sync_customer_details(customer_id, gstin="", state_code="", state_name="", b
         try:
             zh("PUT", f"/contacts/{customer_id}", json=payload)
         except requests.HTTPError as exc:
-            # Fallback if org uses TS instead of TG or rejects inline address sub-dicts
             if exc.response is not None and "118068" in exc.response.text:
                 if payload.get("place_of_contact") == "TG":
                     payload["place_of_contact"] = "TS"
@@ -602,7 +600,7 @@ def preview():
 @app.route("/confirm", methods=["POST"])
 @login_required
 def confirm():
-    """Execute: sync customer details, create invoice with IGST/GST, attach PO, then email or leave as draft."""
+    """Execute: sync customer details, create invoice linked to quotation, attach PO, then email or leave as draft."""
     p = PENDING.pop(request.form.get("token", ""), None)
     if not p:
         return render_template("error.html", msg="Preview expired. Start again.")
@@ -684,6 +682,7 @@ def confirm():
         inv_payload = {
             "customer_id": est["customer_id"],
             "estimate_id": p["estimate_id"],
+            "invoiced_estimate_id": p["estimate_id"],
             "date": today_str,
             "due_date": today_str,
             "payment_terms": 0,
@@ -711,6 +710,14 @@ def confirm():
                 raise
         inv = created["invoice"]
         inv_id = inv["invoice_id"]
+
+        # Ensure the source quotation is marked Accepted/Invoiced in Zoho Invoice
+        try:
+            if est.get("status") == "draft":
+                zh("POST", f"/estimates/{p['estimate_id']}/status/sent")
+            zh("POST", f"/estimates/{p['estimate_id']}/status/accepted")
+        except Exception:
+            pass
 
         # 3. Also set invoice-level Street 1 billing & shipping addresses
         if p["bill_to"]:
